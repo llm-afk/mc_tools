@@ -1,0 +1,12 @@
+__pycache__/
+*.egg-info/
+.venv/
+build/
+dist/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Per-script experiment output stays local.
+scripts/*/data/*
+!scripts/*/data/.gitkeep
