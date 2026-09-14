@@ -7,3 +7,7 @@ from .bench import Bench
 
 __all__ = ["CanFrame", "MitCommand", "MotorState", "control_frame", "mit_frame", "parse_state",
            "CanTransport", "Motor", "MotorBus", "SdoError", "Canable", "Bench"]
+
+from .components.power_supply import PowerSupply, PowerMeasurement, PowerState, PowerSupplyError
+
+__all__ += ["PowerSupply", "PowerMeasurement", "PowerState", "PowerSupplyError"]

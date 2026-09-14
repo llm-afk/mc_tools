@@ -1,7 +1,7 @@
 # mc_tools：硬件组件与实验脚本平台
 
 脚本决定使用哪些电机 ID、CANable、MIT 目标和通信频率。组件层不保存实际启用的电机名单。
-目前实现电机和原生 USB CANable；以后电源、测功机等组件与 motor 平级，供不同脚本复用。
+目前实现电机、原生 USB CANable 与 UDP6721 RS-232 电源；设备由各脚本选择并组合。
 
 ```text
 mc_tools/
@@ -17,6 +17,7 @@ mc_tools/
 │  ├─ core/                    # CAN 帧、输入校验、通用记录
 │  ├─ bench.py                 # 组装脚本指定的硬件实例
 │  └─ runtime.py               # 多电机共享的周期收发调度
+├─ utils/                     # 共享终端看板与命令编辑
 ├─ tests/                      # 离线测试
 └─ docs/                       # 协议与接口说明
 ```
@@ -100,3 +101,11 @@ python -m unittest discover -s tests -v
 
 测试使用模拟 CAN 和键盘输入，不使能真实电机。`docs/hardware_validation_20260914.md`
 保存历史硬件证据；测试数据留在各脚本自己的 `data/` 内。
+
+## 电源组件
+
+`PowerSupply(port="COM26")` 与电机组件独立，支持设置电压/限流、输出开关和新鲜状态读取。
+端口由应用脚本指定，连接和关闭不会自动改变输出。安装：`python -m pip install -e ".[power]"`。
+详见 [电源接口与组合使用说明](docs/power_supply.md)。
+
+电源终端验证：先安装 `python -m pip install -e ".[console,power]"`，再运行 `python -m scripts.power_control`。默认自动探测；`--scan` 仅识别，详情见电源说明。
