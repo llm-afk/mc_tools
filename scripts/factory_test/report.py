@@ -31,7 +31,10 @@ def check_dependencies():
     except ImportError as exc:
         raise RuntimeError('请先安装报告依赖：python -m pip install -e ".[report]"') from exc
     if _find_pdftoppm() is None:
-        raise RuntimeError('生成PNG报告需要Poppler的pdftoppm命令')
+        try:
+            import fitz  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError('请先安装报告渲染依赖：python -m pip install PyMuPDF') from exc
 
 
 def series(rows, x, y):
@@ -264,11 +267,10 @@ def _render_pdf(path, summary):
                 for j in range(y_ticks):
                     value = ymin+(ymax-ymin)*j/(y_ticks-1)
                     line(x,ty(value),x+w,ty(value))
-                    text(x-30,ty(value)-2,f'{value:.1f}',7,muted,'Helvetica')
+                    text(x-30,ty(value)-2,f'{value:.1f}',7,blue,'Helvetica')
                 for j in range(4):
                     value = xmin+(xmax-xmin)*j/3
                     text(tx(value)-7,chart_y-11,f'{value:.1f}',7,muted,'Helvetica')
-                text(x,chart_y+chart_h+3,ylabel,7,muted)
                 return tx,ty
 
             if sec['name'] == 'kt':
@@ -284,11 +286,11 @@ def _render_pdf(path, summary):
                 for a,b in errors[::step]: p.lineTo(px2(a),py2(b))
                 p.lineTo(px2(errors[-1][0]),py2(errors[-1][1])); c.drawPath(p)
                 text(x,y-25,'目标扭矩 / Nm',7,muted)
-                line(190,top-28,201,top-28,blue,.65);text(204,top-30,'误差',7,muted)
+                line(174,top-28,185,top-28,blue,.65);text(188,top-30,'误差 / Nm',7,muted)
                 c.setDash(3,2)
-                line(240,top-28,251,top-28,'#D44B4B',.65)
+                line(246,top-28,257,top-28,'#D44B4B',.65)
                 c.setDash()
-                text(254,top-30,'理想',7,muted)
+                text(260,top-30,'理想',7,muted)
             else:
                 xs,ys = zip(*points); xmin,xmax = 0,max(xs); ymin,ymax = min(0,min(ys)),max(ys)
                 px,py = draw_axes(y,h,xmin,xmax,ymin,ymax,sec['ylabel'],4)
@@ -302,7 +304,6 @@ def _render_pdf(path, summary):
                 for j in range(4):
                     value = power_min+(power_max-power_min)*j/3
                     text(x+w+3,power_y(value)-2,f'{value:.0f}',7,power_color,'Helvetica')
-                text(x+w-62,y+h+3,'电机功率 / W',7,power_color)
                 step = max(1,len(points)//700)
                 c.setStrokeColor(HexColor(blue)); c.setLineWidth(.7)
                 p=c.beginPath();p.moveTo(px(points[0][0]),py(points[0][1]))
@@ -313,19 +314,19 @@ def _render_pdf(path, summary):
                 for a,b in power_points[::step]: p.lineTo(px(a),power_y(b))
                 c.drawPath(p)
                 text(x,y-25,sec['xlabel'],7,muted)
-                line(172,top-28,183,top-28,blue,.7);text(186,top-30,'扭矩',7,muted)
-                line(225,top-28,236,top-28,power_color,.7);text(239,top-30,'电机功率',7,muted)
+                line(154,top-28,165,top-28,blue,.7);text(168,top-30,'扭矩 / Nm',7,muted)
+                line(224,top-28,235,top-28,power_color,.7);text(238,top-30,'电机功率 / W',7,muted)
         else:
             text(x+25,y+40,'没有可用的完整测量数据',10,muted)
-        text(324,top-46,'项目',8,muted);text(423,top-46,'实测',8,muted)
-        if sec['name'] == 'kt': text(515,top-46,'标准',8,muted)
+        text(336,top-46,'项目',8,muted);text(435,top-46,'实测',8,muted)
+        if sec['name'] == 'kt': text(527,top-46,'标准',8,muted)
         for j,m in enumerate(sec['metrics']):
-            yy=top-68-j*(18 if sec['name'] == 'tn' else 28)
-            text(324,yy,m['label'],9)
-            text(417,yy,m['shown']+' '+m['unit'],9)
+            yy=top-68-j*(25 if sec['name'] == 'tn' else 28)
+            text(336,yy,m['label'],9)
+            text(429,yy,m['shown']+' '+m['unit'],9)
             if sec['name'] == 'kt':
-                text(467,yy,statuses.get(m['status'],('待定',muted))[0],7,statuses.get(m['status'],('',muted))[1])
-                text(515,yy,m['standard'],8)
+                text(479,yy,statuses.get(m['status'],('待定',muted))[0],7,statuses.get(m['status'],('',muted))[1])
+                text(527,yy,m['standard'],8)
         if sec['name'] == 'kt': text(32,top-165,sec.get('detail','')[:90],7,muted)
     c.showPage(); c.save()
 
@@ -339,10 +340,19 @@ def render(path, summary):
     prefix = path.with_suffix('')
     try:
         _render_pdf(temporary, summary)
-        completed = subprocess.run(
-            [_find_pdftoppm(), '-png', '-singlefile', '-r', '180', str(temporary), str(prefix)],
-            capture_output=True, text=True, encoding='utf-8', errors='replace', check=False)
-        if completed.returncode != 0 or not path.exists():
-            raise RuntimeError('PNG报告转换失败：'+(completed.stderr.strip() or f'退出码{completed.returncode}'))
+        pdftoppm = _find_pdftoppm()
+        if pdftoppm:
+            completed = subprocess.run(
+                [pdftoppm, '-png', '-singlefile', '-r', '180', str(temporary), str(prefix)],
+                capture_output=True, text=True, encoding='utf-8', errors='replace', check=False)
+            if completed.returncode != 0 or not path.exists():
+                raise RuntimeError('PNG报告转换失败：'+(completed.stderr.strip() or f'退出码{completed.returncode}'))
+        else:
+            import fitz
+            with fitz.open(temporary) as document:
+                if document.page_count != 1:
+                    raise RuntimeError('PNG报告转换失败：PDF页数异常')
+                page = document.load_page(0)
+                page.get_pixmap(dpi=180, alpha=False).save(path)
     finally:
         temporary.unlink(missing_ok=True)

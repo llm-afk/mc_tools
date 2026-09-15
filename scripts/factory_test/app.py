@@ -145,6 +145,7 @@ def main(argv=None):
         motor_sn = read_motor_sn(args)
         directory = create_output_directory(data_root, motor_sn)
         summary = execute(args, directory, motor_sn=motor_sn)
+    summary['output_directory'] = str(directory)
     try:
         summary['sections'] = report.analyze(directory, summary)
         summary['status'] = report.overall(summary['sections'], summary['stages'])

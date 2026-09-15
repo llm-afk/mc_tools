@@ -1,6 +1,15 @@
 # 电机出厂总测
 
-安装：`python -m pip install -e ".[console,power,dynamometer,report]"`
+## 桌面操作 Demo
+
+双击本目录 `产线测试.pyw` 打开窗口（需要已安装 Python 3.11 或更高版本）。
+首次启动会在窗口输出区自动检查并安装 `pyserial`、`reportlab`和 `PyMuPDF`；需要电脑可以访问 Python 包源。
+USB 转 CAN 自动扫描，可下拉选择并刷新；输入最大扭矩和电机 ID（1～9），点击“开始测试”。
+设备扫描、测试进度、实时数据、结果和错误统一显示在窗口下方的CMD输出区，不弹出控制台；点击“停止测试”执行停机收尾。
+本次测试结束后，“打开结果目录”直接进入当前电机的输出文件夹，查看报告和 CSV。
+
+手动安装（可选）：`python -m pip install -e ".[console,power,dynamometer,report]"`
+也可双击本目录的 `安装依赖.cmd`；脚本会请求管理员权限，离线安装本项目实际使用的 CANable WinUSB、WCH CH343 和 WCH CH340 驱动，再安装 Python 依赖。脚本会根据自身位置找到项目根目录，因此整个 `mc_tools` 移动后仍然可用。
 
 实际总测：
 
