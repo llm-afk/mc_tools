@@ -29,8 +29,11 @@ class RecordingTests(unittest.TestCase):
             files = [p for p in Path(folder).rglob('*') if p.is_file()]
             self.assertEqual([p.name for p in files], ['curve.csv'])
             with files[0].open(encoding='utf-8') as f:
-                self.assertEqual(next(csv.reader(f)), app.COLUMNS+[
+                self.assertEqual(next(csv.reader(f)), [
+                    'motor_time_ms', 'motor_speed_rad_s', 'motor_torque',
+                    'motor_temperature_c', 'driver_temperature_c',
                     'motor_speed_smooth_rad_s', 'motor_torque_smooth',
+                    'dyno_time_ms', 'dyno_torque_nm', 'dyno_speed_rad_s', 'dyno_power_w',
                     'dyno_speed_smooth_rad_s', 'dyno_torque_smooth_nm'])
     def test_every_motor_frame_is_one_csv_row(self):
         output = io.StringIO()

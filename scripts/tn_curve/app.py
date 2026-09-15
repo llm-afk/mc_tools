@@ -7,8 +7,8 @@
 电机由电池供电，电源只给磁粉阻尼器供电。quit / Ctrl+C 停止。
 前馈扭矩用 1 秒线性升至目标，再保持 1 秒后加载和记录；数据写入 data/。
 正常结束用 STOP_TORQUE_RAMP_S 将扭矩降零，确认失能后直接关闭电源。
-只输出 curve.csv：两路真实帧按时间记录，未更新的一路留空，不用旧值补齐。
-停机后追加电机、测功机速度/扭矩平滑四列；窗口在 *_SMOOTH_S 配置，原始值保留。
+只输出 curve.csv：停机后把两路真实帧各自连续排列，第 N 帧并排，不重复补点。
+停机后追加电机、测功机速度/扭矩平滑四列；各组用自己的时间列，也可直接按行号绘图。
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -27,7 +27,8 @@ from motor_platform.components.dynamometer import detect_dynamometers
 from motor_platform.components.power_supply.discovery import resolve_power_port
 from utils.terminal import TerminalConsole
 from scripts.tn_curve.recording import CurveRecorder, event_row
-from scripts.tn_curve.smoothing import append_smoothed_columns
+from utils.smoothing import append_smoothed_columns
+from utils.csv_streams import pack_streams
 
 # 应用配置：设备组件不保存这些实验参数。
 MOTOR_ID = 1                     # 选定 CAN 总线上的电机 ID，--id 可覆盖
@@ -353,6 +354,7 @@ def main(argv=None):
                 append_smoothed_columns(csv_path, MOTOR_SPEED_SMOOTH_S,
                                         MOTOR_TORQUE_SMOOTH_S, FEEDBACK_TIMEOUT_S,
                                         DYNO_SPEED_SMOOTH_S, DYNO_TORQUE_SMOOTH_S)
+                pack_streams(csv_path)
             except Exception as exc:
                 if original is None:
                     raise

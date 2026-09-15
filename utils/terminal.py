@@ -1,4 +1,5 @@
 """Terminal dashboard and editor on a separate event loop; no CAN access."""
+import asyncio
 import queue
 import threading
 
@@ -112,7 +113,16 @@ class TerminalConsole:
 
     def _run(self):
         try:
-            self.app.run(pre_run=self.ready.set, set_exception_handler=False)
+            async def run_ui():
+                result = await self.app.run_async(pre_run=self.ready.set,
+                                                  set_exception_handler=False,
+                                                  handle_sigint=False)
+                # Win32 input detach wakes its executor waiter. Keep this private
+                # loop alive briefly so queued ready/remove callbacks finish
+                # before asyncio.run shuts down the default executor.
+                await asyncio.sleep(.05)
+                return result
+            asyncio.run(run_ui())
         except BaseException as exc:
             self.error = exc
         finally:

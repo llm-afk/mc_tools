@@ -135,17 +135,23 @@ def main(argv=None):
             raw.disable()
             with bench.start(command_timeout=0.25) as control:
                 motor = control.motor(args.id)
+                motor.start_recording()
+                def record_pending():
+                    for sample in motor.drain_states():
+                        recorder.write(sample)
+                    if motor.stats().get('recording_dropped', 0):
+                        raise RuntimeError('motor recording queue overflow')
                 try:
                     motor.enable()
                     enabled = True
                     initial = motor.state()
+                    state = initial
                     if initial.error_code or abs(initial.velocity) > 0.1:
                         raise RuntimeError(f"initial motor feedback not ready: {initial}")
-                    recorder.write(initial)
+                    record_pending()
                     motor.set_mit(desired)
                     started = time.perf_counter()
                     next_display = started
-                    previous_rx = initial.received_at
                     notice = "0x400 控制帧已收到 TPDO5 回传，电机已自动使能"
                     while args.duration == 0 or time.perf_counter() - started < args.duration:
                         line = dashboard.poll() if interactive else None
@@ -197,9 +203,7 @@ def main(argv=None):
                         stats = motor.stats()
                         if state.error_code or stats["fault"] or (enabled and not stats["periodic_active"]):
                             raise RuntimeError(f"motor fault: {state}, {stats}")
-                        if state.received_at != previous_rx:
-                            recorder.write(state)
-                            previous_rx = state.received_at
+                        record_pending()
                         now = time.perf_counter()
                         status_due = now >= next_display
                         if status_due or (interactive and getattr(dashboard, "dirty", False)):
@@ -231,10 +235,14 @@ def main(argv=None):
                             if original is None:
                                 raise
                             original.add_note(f'Disable unconfirmed: {cleanup}')
+                        finally:
+                            record_pending()
                         enabled = False
+                    else:
+                        record_pending()
     if shutdown_notice:
         print(shutdown_notice, flush=True)
-    print(f"Feedback snapshots: {output.resolve()}", flush=True)
+    print(f"Feedback frames: {output.resolve()}", flush=True)
     if motor is not None:
         print("Final statistics:", motor.stats(), flush=True)
 

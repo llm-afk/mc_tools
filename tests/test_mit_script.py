@@ -45,12 +45,16 @@ class MitScriptTests(unittest.TestCase):
 
     def test_real_run_flow_with_fake_hardware(self):
         state=MotorState(1,0,0,0,25,30,0,1)
-        with patch('scripts.mit_control.app.Bench') as factory, patch('scripts.mit_control.app.StateRecorder'), patch('builtins.print'):
+        with patch('scripts.mit_control.app.Bench') as factory, patch('scripts.mit_control.app.StateRecorder') as recording, patch('builtins.print'):
             bench=factory.return_value.__enter__.return_value
             bench.motor.return_value.receive_state.return_value=state
             control=bench.start.return_value.__enter__.return_value
             motor=control.motor.return_value
             motor.state.return_value=state
+            # 一次轮询之间的多帧都应保留，包括相同主机时间戳。
+            frames = [state, MotorState(1,0,0,1,25,30,0,1), MotorState(1,0,0,2,25,30,0,1.001)]
+            batches = iter([frames[:2], frames[2:]])
+            motor.drain_states.side_effect = lambda: next(batches, [])
             motor.stats.return_value=dict(fault=None,periodic_active=True,tx_count=1,rx_count=1,actual_tx_hz=1000)
             main(['--duration','0.02','--position','0.1','--kp','2','--no-console'])
             bench.motor.assert_called_once_with(1)
@@ -58,6 +62,8 @@ class MitScriptTests(unittest.TestCase):
             motor.enable.assert_called_once()
             motor.set_mit.assert_called_with(MitCommand(position=0.1,kp=2))
             motor.disable.assert_called_once()
+            self.assertEqual([call.args[0] for call in recording.return_value.__enter__.return_value.write.call_args_list], frames)
+            motor.start_recording.assert_called_once()
 
     def test_console_enable_always_resends_enabling_rpdo(self):
         state = MotorState(1, 0, 0, 0, 25, 30, 0, 1)

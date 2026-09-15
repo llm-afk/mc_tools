@@ -10,7 +10,9 @@ mc_tools/
 │  │  ├─ app.py               # ID、频率配置和控制流程
 │  │  ├─ console.py           # 终端反馈看板与命令编辑
 │  │  └─ data/                # 本脚本的反馈 CSV
-│  └─ （以后增加 tn_curve、kt_test 等实际实验流程）
+│  ├─ tn_curve/              # 电机 T-N 曲线实验
+│  ├─ kt_curve/              # 关节输出扭矩一致性实验
+│  └─ torque_impact/         # 转子与转子架粘接冲击实验
 ├─ motor_platform/
 │  ├─ components/motor/        # 协议、使能/失能、MIT、状态解析
 │  ├─ transports/canable.py    # 原生 WinUSB CAN FD
@@ -65,7 +67,7 @@ quit                    # 失能并退出
 kp/kd 以实际增益填写，协议按 0.01 分辨率编码为 uint16。`--id/--serial/--rate` 会覆盖 `app.py` 中的默认配置。
 
 应用每约 10 ms 刷新一次控制租约，CAN 周期目标默认 1 kHz；终端默认 10 Hz 刷新。CSV 保存应用读取到的
-新反馈快照，并非完整逐 CAN 帧日志。退出、Ctrl+C 或异常时尝试失能；ACK 失败会作为错误报告。
+全部真实反馈帧。退出、Ctrl+C 或异常时尝试失能；ACK 失败会作为错误报告。
 
 ## 脚本内选择多个电机
 
@@ -87,7 +89,7 @@ with Bench(transport=Canable(CANABLE_SERIAL), motor_ids=MOTOR_IDS, rate_hz=1000)
 独占同一个 CANable；多电机控制应放在同一个应用脚本和平台会话中。
 
 `scripts/` 只放调用下层组件完成实际任务的应用流程，每项任务建立独立目录，例如
-`mit_control/`、`tn_curve/`、`kt_test/`。协议编码、USB 检查和调度正确性归入组件测试，不作为应用脚本。
+`mit_control/`、`tn_curve/`、`kt_curve/`、`torque_impact/`。协议编码、USB 检查和调度正确性归入组件测试，不作为应用脚本。
 新增硬件组件放到 `motor_platform/components/`。
 协议见 `docs/motor_protocol.md`，周期接口见 `docs/periodic_control.md`。
 
@@ -117,3 +119,26 @@ python -m unittest discover -s tests -v
 与 motor、power_supply 平级，后台接收独立于界面刷新；详见 [测功机接口](docs/dynamometer.md)。
 
 测功机接收验证：`python -m scripts.dynamometer_test`，自动探测、115200 8N1，数据保存在该脚本的 `data/`。需要安装 `.[console,dynamometer]`。
+
+## 关节输出扭矩一致性
+
+`python -m scripts.kt_curve --id 1 --serial <SN> --torque 30`：阻尼器电源默认
+24 V / 3 A，电机目标扭矩在 5 秒内从零线性升到指定值，逐帧采集后降扭矩停机。
+单份 CSV 保存在脚本自己的 `data/`，详见 [运行与数据说明](scripts/kt_curve/README.md)。
+
+## 正反扭矩冲击
+
+`python -m scripts.torque_impact --id 1 --serial <SN> --torque 30`：双向初始测量后执行
+5 轮正反脉冲（保持0.1秒、休息0.9秒）。10次冲击分别与第一次同方向扭矩比较，
+输出出力保持率和 PASS/FAIL/异常。
+参数、流程与初始门槛见 [冲击测试说明](scripts/torque_impact/README.md)。
+
+## CSV 连续绘图
+
+T-N 和 KT 脚本将电机和测功机各自第 N 帧并排放在第 N 行。每组数据中间没有交替空行，
+全部真实帧保留；数量较少的组只在末尾留空。两组使用各自的时间列，同一行不表示同步采样。
+冲击脚本以电机时间为统一时间列，将时间邻近的测功机帧一对一匹配；测功机帧不会重复使用，
+多余帧舍弃，20 ms 内无匹配则留空。三类脚本都不使用旧值填充或插值，MIT 控制台逐帧记录。
+
+转换以前的两路混排文件：`python -m utils.csv_streams "旧文件.csv"`。
+另存同目录 `旧文件_continuous.csv`，保留原文件，已有同名输出时拒绝覆盖。
