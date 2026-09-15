@@ -11,3 +11,7 @@ __all__ = ["CanFrame", "MitCommand", "MotorState", "control_frame", "mit_frame",
 from .components.power_supply import PowerSupply, PowerMeasurement, PowerState, PowerSupplyError
 
 __all__ += ["PowerSupply", "PowerMeasurement", "PowerState", "PowerSupplyError"]
+
+from .components.dynamometer import Dynamometer, DynamometerState
+
+__all__ += ["Dynamometer", "DynamometerState"]

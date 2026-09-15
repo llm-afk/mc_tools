@@ -73,7 +73,8 @@ kp/kd 以实际增益填写，协议按 0.01 分辨率编码为 uint16。`--id/-
 from motor_platform import Bench, MitCommand
 
 MOTOR_IDS = [1, 2]  # 只属于当前脚本
-with Bench(motor_ids=MOTOR_IDS, serial="20903498384550052", rate_hz=1000) as bench:
+from motor_platform import Canable
+with Bench(transport=Canable(CANABLE_SERIAL), motor_ids=MOTOR_IDS, rate_hz=1000) as bench:
     with bench.start() as control:
         m1 = control.motor(1)
         m2 = control.motor(2)
@@ -109,3 +110,10 @@ python -m unittest discover -s tests -v
 详见 [电源接口与组合使用说明](docs/power_supply.md)。
 
 电源终端验证：先安装 `python -m pip install -e ".[console,power]"`，再运行 `python -m scripts.power_control`。默认自动探测；`--scan` 仅识别，详情见电源说明。
+
+## 测功机组件
+
+`Dynamometer(port=...)` 接收 DYN-200 的 6 字节 HEX 主动上报，115200 8N1。
+与 motor、power_supply 平级，后台接收独立于界面刷新；详见 [测功机接口](docs/dynamometer.md)。
+
+测功机接收验证：`python -m scripts.dynamometer_test`，自动探测、115200 8N1，数据保存在该脚本的 `data/`。需要安装 `.[console,dynamometer]`。

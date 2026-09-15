@@ -5,7 +5,6 @@ import math
 
 @dataclass(frozen=True)
 class BenchConfig:
-    serial: str
     motor_ids: tuple[int, ...]
     bitrate: int = 1_000_000
     data_bitrate: int = 4_000_000
@@ -16,8 +15,6 @@ class BenchConfig:
 
     def __post_init__(self):
         object.__setattr__(self, "motor_ids", tuple(self.motor_ids))
-        if not isinstance(self.serial, str) or not self.serial.strip():
-            raise ValueError("script must specify a CANable serial")
         ids = self.motor_ids
         if not ids or any(type(node) is not int or not 0 <= node <= 127 for node in ids):
             raise ValueError("script must specify motor IDs in 0..127")

@@ -4,6 +4,7 @@ Uses legacy gs_usb frames (no Elmue blobs, no USB timestamps), not SLCAN.
 Only inspect() is read-only. open() explicitly configures and starts CAN FD.
 """
 import ctypes as C
+from collections import deque
 from ctypes import wintypes as W
 import json
 import math
@@ -234,6 +235,11 @@ class Canable:
     """Exclusive single-channel connection; use through one MotorBus."""
     @staticmethod
     def detect():
+        """列出已连接适配器，返回包含 serial_number 和 USB path 的字典列表。
+
+        仅枚举设备，不启动 CAN。上层使用 serial_number 配置目标适配器，
+        不保存可能随插口变化的 path。命令行：python -m motor_platform --list。
+        """
         if os.name != "nt":
             raise OSError("CANable WinUSB discovery requires Windows")
         script = r'''
@@ -253,7 +259,17 @@ ConvertTo-Json -InputObject $items -Compress
         return json.loads(result.stdout)
 
     def __init__(self, serial_number=None):
+        """只保存连接参数，不打开 USB。
+
+        上层应用应传入指定 SN；None 仅在恰好一只适配器时可用。
+        显式 SN 未匹配时直接报错，不回退到其他适配器。
+        """
         self.serial_number = serial_number
+        self.counter_reports = 0
+        self.last_counter_report = None
+        self.protocol_reports = 0
+        self.last_protocol_report = None
+        self._recent_protocol_reports = deque()
         self._usb = None
         self._configured = False
         self._started = False
@@ -261,9 +277,11 @@ ConvertTo-Json -InputObject $items -Compress
         self._rx = bytearray()
 
     def _connect(self):
-        devices = [d for d in self.detect() if self.serial_number is None or d["serial_number"] == self.serial_number]
+        available = self.detect()
+        devices = [d for d in available if self.serial_number is None or d["serial_number"] == self.serial_number]
         if len(devices) != 1:
-            raise OSError(f"matched {len(devices)} CANable devices; specify serial_number")
+            serials = ', '.join(d['serial_number'] for d in available) or '(none)'
+            raise OSError(f"matched {len(devices)} CANable devices; connected serials: {serials}; specify --serial when multiple adapters are connected")
         return _Usb(devices[0]["path"])
 
     @staticmethod
@@ -298,9 +316,9 @@ ConvertTo-Json -InputObject $items -Compress
         self._usb = self._connect()
         try:
             self.info = self._info(self._usb)
-            if (self.info["channels"] != 1 or self.info["firmware"] != "0x260803"
+            if (self.info["channels"] != 1 or self.info["firmware"] not in {"0x260803", "0x260618"}
                     or int(self.info["features"], 16) & 0x4500 != 0x4500):
-                raise OSError("backend validated for single-channel Elmue 0x260803 with CAN FD only")
+                raise OSError(f"unsupported CANable capabilities/firmware: {self.info}; supported firmware: 0x260803, 0x260618")
             nominal = bit_timing(self.info["clock_hz"], bitrate, sample_point, self.info["nominal_limits"])
             data = bit_timing(self.info["clock_hz"], data_bitrate, data_sample_point, self.info["data_limits"])
             self._configured = True
@@ -335,6 +353,17 @@ ConvertTo-Json -InputObject $items -Compress
                     del self._rx[:size]
                     frame = decode_usb(packet)
                     if frame is not None:
+                        # Elmue legacy reports counter changes with CAN_ERR_FLAG even
+                        # when no error class is set (Firmware/Candlelight/buffer.c,
+                        # buf_store_error). Keep diagnostics; this is not motor data.
+                        if is_counter_report(frame):
+                            self.counter_reports += 1
+                            self.last_counter_report = {
+                                'tx_errors': frame.data[6], 'rx_errors': frame.data[7],
+                                'received_at': time.perf_counter()}
+                            continue
+                        if self._record_transient(frame, time.perf_counter()):
+                            continue
                         return frame
                     continue
             remaining = deadline - time.perf_counter()
@@ -344,6 +373,22 @@ ConvertTo-Json -InputObject $items -Compress
             if chunk is None:
                 return None
             self._rx.extend(chunk)
+
+    def _record_transient(self, frame, now):
+        # 仅容忍低计数的位填充/帧格式错误。报告不当作反馈，运行时
+        # 的反馈超时仍然有效。1 秒内第 3 次报告交给上层触发停机。
+        if not (frame.is_error and frame.can_id == 0x8 and not frame.is_fd
+                and not frame.is_extended and not frame.is_remote
+                and len(frame.data) == 8 and frame.data[:2] == bytes(2)
+                and frame.data[2] in (2, 4) and frame.data[4:6] == bytes(2)
+                and max(frame.data[6:]) <= 8):
+            return False
+        self.protocol_reports += 1
+        self.last_protocol_report = dict(can_id=frame.can_id, data=frame.data.hex(), received_at=now)
+        while self._recent_protocol_reports and now-self._recent_protocol_reports[0] >= 1:
+            self._recent_protocol_reports.popleft()
+        self._recent_protocol_reports.append(now)
+        return len(self._recent_protocol_reports) < 3
 
     def close(self):
         usb, self._usb = self._usb, None
@@ -355,3 +400,15 @@ ConvertTo-Json -InputObject $items -Compress
             self._rx.clear()
             if usb:
                 usb.close()
+
+
+def is_counter_report(frame):
+    """Only class-free Elmue counter reports below warning level are nonfatal.
+
+    Byte 5 contains firmware application faults: never discard a nonzero value.
+    Actual protocol errors, warning/passive/bus-off and malformed frames pass on.
+    """
+    return (frame.is_error and frame.can_id == 0 and not frame.is_fd
+            and not frame.is_extended and not frame.is_remote
+            and len(frame.data) == 8 and frame.data[:6] == bytes(6)
+            and max(frame.data[6:]) < 96)

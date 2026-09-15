@@ -15,7 +15,7 @@ MotorBus / CANable WinUSB → CAN FD 总线 → 多个电机
 
 ## ID 与配置
 
-每个脚本自己提供 `Bench(motor_ids=[1,2], serial="20903498384550052", rate_hz=1000)`。
+每个脚本创建 `Canable(CANABLE_SERIAL)`，传给 `Bench(transport=can, motor_ids=[1,2], rate_hz=1000)`。SN 仅属于应用配置及 USB 传输层；Bench 管理传入传输的打开与关闭，不选择适配器。使用 `python -m motor_platform --list` 查看已连接 SN。
 组件不加载统一关节配置。重复/非法 ID 会被拒绝，未列出的 ID 不创建实例。
 配置只作用于主机，不修改电机 EEPROM。实例 node_id 为只读属性。
 
@@ -27,7 +27,8 @@ MotorBus / CANable WinUSB → CAN FD 总线 → 多个电机
 import time
 from motor_platform import Bench, MitCommand
 
-with Bench(motor_ids=[1], serial="20903498384550052") as bench:
+from motor_platform import Canable
+with Bench(transport=Canable(CANABLE_SERIAL), motor_ids=[1]) as bench:
     with bench.start(rate_hz=1000, command_timeout=0.25) as control:
         j1 = control.motor(1)  # 重复获取返回同一实例
         j1.set_rate(1000)        # 每台电机可独立修改目标发送频率

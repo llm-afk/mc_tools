@@ -84,9 +84,21 @@ class MotorChannel:
                 raise TimeoutError(f"{self.name}: motor feedback absent or stale")
             return state
 
+    def start_recording(self, capacity=8192):
+        """应用可选逐帧记录；必须在使能前调用，不改变 CAN 发送频率。"""
+        self._motor.start_recording(capacity)
+
+    def drain_states(self):
+        return self._motor.drain_states()
+
     def stats(self):
         with self._runtime._lock:
             data = asdict(self._stats)
+            data['recording_dropped'] = self._motor.recording_dropped
+            data['can_counter_reports'] = getattr(self._runtime._bus.transport, 'counter_reports', 0)
+            data['can_protocol_reports'] = getattr(self._runtime._bus.transport, 'protocol_reports', 0)
+            data['can_last_protocol_report'] = getattr(self._runtime._bus.transport, 'last_protocol_report', None)
+            data['can_last_counter_report'] = getattr(self._runtime._bus.transport, 'last_counter_report', None)
             span = data["last_tx_at"] - data["first_tx_at"]
             data.update(node_id=self.node_id, name=self.name, target_hz=self._rate_hz,
                         periodic_active=self._active,

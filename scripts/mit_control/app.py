@@ -3,6 +3,9 @@
 在 mc_tools 目录运行：
     python -m scripts.mit_control --id 1 --rate 1000
 
+查看适配器 SN：python -m motor_platform --list
+指定适配器：在上述运行命令后加 --serial <SN>，覆盖下方 CANABLE_SERIAL。
+
 运行中可输入：
     set p v tau kp kd   设置 MIT 指令
     stop                指令清零
@@ -24,14 +27,14 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from motor_platform import Bench, MitCommand
+from motor_platform import Bench, MitCommand, Canable
 from motor_platform.core.recording import StateRecorder
 from scripts.mit_control.console import ConsoleDashboard
 
-# Change these per application; no global joint registry is loaded.
-MOTOR_ID = 1
-CANABLE_SERIAL = "20903498384550052"
-COMMUNICATION_HZ = 1000
+# 本脚本的设备配置；底层不保存 SN 或电机清单。
+MOTOR_ID = 1  # 选定 CAN 总线上的电机 ID，--id 可覆盖
+CANABLE_SERIAL = "20663474384550052"  # USB 适配器 SN，--serial 可覆盖；不会自动换设备
+COMMUNICATION_HZ = 1000  # 周期 MIT 发送目标 Hz，--rate 可覆盖
 
 def parse_console_command(line):
     """Parse one operator command without touching hardware."""
@@ -105,7 +108,7 @@ def parse_args(argv=None):
         if args.display_hz > 100:
             raise ValueError("display-hz must be <=100")
         # Validate all script configuration before touching hardware.
-        Bench(motor_ids=[args.id], serial=args.serial, rate_hz=args.rate)
+        Bench(transport=Canable(args.serial), motor_ids=[args.id], rate_hz=args.rate)
     except (ValueError, TypeError) as exc:
         parser.error(str(exc))
     return args, command
@@ -127,7 +130,7 @@ def main(argv=None):
     shutdown_notice = ''
     # Initialize the terminal before enabling: UI startup cannot consume a lease.
     with StateRecorder(output) as recorder, dashboard_context as dashboard:
-        with Bench(motor_ids=[args.id], serial=args.serial, rate_hz=args.rate) as bench:
+        with Bench(transport=Canable(args.serial), motor_ids=[args.id], rate_hz=args.rate) as bench:
             raw = bench.motor(args.id)
             raw.disable()
             with bench.start(command_timeout=0.25) as control:

@@ -33,12 +33,12 @@ class MitScriptTests(unittest.TestCase):
                 parse_console_command(text)
 
     def test_argument_parsing_does_not_open_devices(self):
-        with patch("motor_platform.bench.Canable") as factory:
+        with patch("scripts.mit_control.app.Canable.open") as factory:
             parse_args([])
             factory.assert_not_called()
 
     def test_invalid_command_before_hardware(self):
-        with patch("motor_platform.bench.Canable") as factory, patch("sys.stderr"):
+        with patch("scripts.mit_control.app.Canable.open") as factory, patch("sys.stderr"):
             for argv in (["--id","128"],["--kp","-1"],["--torque","nan"],["--rate","0"],["--duration","-1"],["--duration","nan"]):
                 with self.assertRaises(SystemExit):parse_args(argv)
             factory.assert_not_called()

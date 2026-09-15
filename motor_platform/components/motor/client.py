@@ -1,5 +1,6 @@
 """Single receive owner; synchronous, serialized SDO transactions."""
 import math
+from collections import deque
 import threading
 import time
 from typing import Protocol
@@ -28,6 +29,9 @@ class MotorBus:
 
     Call poll()/receive_state() to update states; there is no background sender.
     close() releases transport and does not implicitly disable motors.
+
+    USB SN 与适配器选择由上层负责；这里仅接收已打开的 CAN 传输实例。
+    同一总线上的电机共用本对象，不同总线分别创建，电机 ID 按总线隔离。
     """
     def __init__(self, transport: CanTransport):
         self.transport = transport
@@ -58,6 +62,11 @@ class MotorBus:
         for motor in self._motors.values():
             if frame.can_id == 0x190 + motor.node_id:
                 motor.last_state = parse_state(frame, motor.node_id, time.perf_counter())
+                with motor._samples_lock:
+                    if motor._samples is not None:
+                        if len(motor._samples) == motor._samples.maxlen:
+                            motor._dropped_samples += 1
+                        motor._samples.append(motor.last_state)
                 return motor.last_state
 
     def poll(self, timeout=0.1):
@@ -146,6 +155,37 @@ class Motor:
         self._node_id = node_id
         self.last_state = None
         self.enabled = None
+        self._samples_lock = threading.Lock()
+        self._samples = None
+        self._dropped_samples = 0
+
+    def start_recording(self, capacity=8192):
+        """启用逐帧队列，供应用记录；state/last_state 仍只表示最新状态。
+
+        一条反馈只入队一次，包括等待使能/失能期间收到的反馈。
+        队列只允许一个消费者；溢出计数可通过 recording_dropped 查询。
+        """
+        if type(capacity) is not int or capacity <= 0:
+            raise ValueError('capacity must be a positive integer')
+        with self._samples_lock:
+            if self._samples is not None:
+                raise RuntimeError('motor recording already started')
+            self._samples = deque(maxlen=capacity)
+            self._dropped_samples = 0
+
+    def drain_states(self):
+        """一次取出尚未消费的全部真实反馈；重复调用不会重复返回。"""
+        with self._samples_lock:
+            if self._samples is None:
+                raise RuntimeError('start_recording before draining motor frames')
+            result = list(self._samples)
+            self._samples.clear()
+            return result
+
+    @property
+    def recording_dropped(self):
+        with self._samples_lock:
+            return self._dropped_samples
 
     @property
     def node_id(self):

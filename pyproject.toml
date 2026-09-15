@@ -12,6 +12,7 @@ dependencies = []
 [project.optional-dependencies]
 console = ["prompt-toolkit>=3.0.48,<4"]
 power = ["pyserial>=3.5,<4"]
+dynamometer = ["pyserial>=3.5,<4"]
 
 [tool.setuptools]
 include-package-data = false
