@@ -47,7 +47,7 @@ class ConsistencyTests(unittest.TestCase):
     def test_parameters_and_signed_ramp(self):
         args = self.args('--torque', '-20', '--voltage', '24', '--current', '3')
         self.assertEqual((args.id, args.torque, args.voltage, args.current), (1, -20, 24, 3))
-        self.assertEqual([app.ramp_torque(t, -20) for t in (-1, 0, 2.5, 5, 6)], [0, 0, -10, -20, -20])
+        self.assertEqual([app.ramp_torque(t, -20) for t in (-1, 0, 1.5, 3, 4)], [0, 0, -10, -20, -20])
         self.assertIsNone(app.TORQUE_FF)
         for extra in (['--torque', 'nan'], ['--torque', '0'], ['--id', '128'],
                       ['--current', '-1'], ['--voltage', 'inf'], ['--serial', ''],
@@ -66,7 +66,7 @@ class ConsistencyTests(unittest.TestCase):
         rows = list(csv.DictReader(io.StringIO(stream.getvalue())))
         self.assertEqual(len(rows), 5)
         self.assertEqual([float(r['time_ms']) for r in rows], [500, 2000, 2000, 2000, 5000])
-        self.assertEqual([float(r['application_target_torque']) for r in rows], [0, 6, 6, 6, 18])
+        self.assertEqual([float(r['motor_application_target_torque']) for r in rows], [0, 6, 6, 6, 18])
         self.assertEqual(sum(r['motor_torque'] != '' for r in rows), 2)
         self.assertTrue(all(not (r['motor_torque'] and r['dyno_torque_nm']) for r in rows))
 
@@ -131,7 +131,7 @@ class ConsistencyTests(unittest.TestCase):
             events.append('run')
             rec = Recorder(0, 5)
             rec.add('motor', [state(0), state(1)])
-            rec.add('dyno', [state(.5)])
+            rec.add('dyno', [state(.005)])
             result.update(recorder=rec, reason='completed')
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(app, '__file__', str(Path(directory)/'app.py')), \
@@ -150,8 +150,8 @@ class ConsistencyTests(unittest.TestCase):
             with files[0].open() as source:
                 rows = list(csv.DictReader(source))
             self.assertEqual(len(rows), 2)
-            self.assertEqual(list(rows[0]), ['motor_time_ms', 'motor_torque', 'motor_temperature_c',
-                'driver_temperature_c', 'motor_torque_smooth', 'dyno_time_ms', 'dyno_torque_nm',
+            self.assertEqual(list(rows[0]), ['time_ms', 'motor_torque', 'motor_temperature_c',
+                'driver_temperature_c', 'motor_application_target_torque', 'motor_torque_smooth', 'dyno_torque_nm',
                 'dyno_torque_smooth_nm'])
             self.assertEqual(files[0].name, 'kt_curve.csv')
             self.assertNotEqual(rows[0]['dyno_torque_smooth_nm'], '')

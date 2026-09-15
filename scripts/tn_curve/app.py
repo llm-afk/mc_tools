@@ -7,8 +7,8 @@
 电机由电池供电，电源只给磁粉阻尼器供电。quit / Ctrl+C 停止。
 前馈扭矩用 1 秒线性升至目标，再保持 1 秒后加载和记录；数据写入 data/。
 正常结束用 STOP_TORQUE_RAMP_S 将扭矩降零，确认失能后直接关闭电源。
-只输出 curve.csv：停机后把两路真实帧各自连续排列，第 N 帧并排，不重复补点。
-停机后追加电机、测功机速度/扭矩平滑四列；各组用自己的时间列，也可直接按行号绘图。
+只输出 curve.csv：电机时间作为统一时间列，一对一匹配测功机帧，多余测功机帧舍弃。
+停机后追加电机、测功机速度/扭矩平滑四列；20ms内无可用匹配则留空，不复制帧。
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -293,13 +293,14 @@ def parse_args(argv=None):
     return args
 
 
-def main(argv=None):
+def main(argv=None, *, output_dir=None, quiet=False):
     args = parse_args(argv)
     # Passive dyno discovery first; keep its port out of active SCPI discovery.
     matches = detect_dynamometers() if DYNO_PORT == 'auto' else [DYNO_PORT]
     if len(matches) != 1:
         raise RuntimeError(f'Expected one dynamometer, found {matches}; set DYNO_PORT')
-    directory = Path(__file__).resolve().parent/'data'/f'{datetime.now():%Y%m%d-%H%M%S-%f}'
+    directory = (Path(output_dir) if output_dir is not None else
+                 Path(__file__).resolve().parent/'data'/f'{datetime.now():%Y%m%d-%H%M%S-%f}')
     directory.mkdir(parents=True)
     summary = {'motor_id': args.id, 'target_torque': args.torque, 'config': {k: v for k, v in globals().items()
                if k.isupper() and k != 'COLUMNS'}, 'timestamp': 'host perf_counter reception; no interpolation'}
@@ -350,16 +351,19 @@ def main(argv=None):
         if csv_path.exists():
             original = sys.exception()
             try:
-                print('正在生成电机和测功机的速度、扭矩平滑列…', flush=True)
+                if not quiet:
+                    print('正在生成电机和测功机的速度、扭矩平滑列…', flush=True)
                 append_smoothed_columns(csv_path, MOTOR_SPEED_SMOOTH_S,
                                         MOTOR_TORQUE_SMOOTH_S, FEEDBACK_TIMEOUT_S,
                                         DYNO_SPEED_SMOOTH_S, DYNO_TORQUE_SMOOTH_S)
-                pack_streams(csv_path)
+                pack_streams(csv_path, align_motor=True)
             except Exception as exc:
                 if original is None:
                     raise
                 original.add_note(f'CSV smoothing failed; original data preserved: {exc}')
-        print(f'Test result: {summary.get("reason", "incomplete")}; rows={summary.get("rows", 0)}\nCSV: {directory / "curve.csv"}')
+        if not quiet:
+            print(f'Test result: {summary.get("reason", "incomplete")}; rows={summary.get("rows", 0)}\nCSV: {directory / "curve.csv"}')
+    return dict(summary, csv=str(directory/'curve.csv'))
 
 
 if __name__ == '__main__':

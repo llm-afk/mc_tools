@@ -5,8 +5,8 @@
 阻尼器默认 24 V / 3 A，可用 --voltage / --current 覆盖。电机由独立电池供电。
 电源开启后先保持 0.5 秒，再开始电机扭矩爬升；quit / Ctrl+C 提前结束。
 采集后 1 秒降扭矩，再失能并关闭电源。
-5 秒指采集斜坡，不包含连接和停机；Windows 调度并非硬实时。仅输出 data/ 下一个 CSV。
-两路数据各自连续往下排列，第 N 帧并排；可以直接按行号绘图。
+3 秒指采集斜坡，不包含连接和停机；Windows 调度并非硬实时。仅输出 data/ 下一个 CSV。
+CSV以电机时间为准，一对一匹配测功机帧，多余帧舍弃；实际下发目标也逐帧记录。
 """
 import argparse
 import csv
@@ -36,7 +36,7 @@ LOAD_CURRENT_A = 3.0            # 阻尼器限流，--current 覆盖；整个采
 LOAD_SETTLE_S = 0.5             # 电源输出确认开启后保持，再使能电机；不计入 5 秒采集
 POWER_PORT = 'auto'             # 多台电源时在此指定 COM 端口
 DYNO_PORT = 'auto'              # 多台测功机时在此指定 COM 端口
-RAMP_DURATION_S = 5.0           # 从开始爬升到结束采集的时间
+RAMP_DURATION_S = 3.0           # 从开始爬升到结束采集的时间
 MOTOR_HZ = 1000                 # 周期 CAN 发送目标频率；目标值按实际经过时间计算
 TARGET_UPDATE_S = 0.001         # 应用更新目标的间隔；迟到不补发积压命令
 STOP_RAMP_S = 1.0               # 正常结束、用户停止：保持阻尼，线性降扭矩到零
@@ -201,13 +201,14 @@ def power_off(power):
         original.add_note(f'Power shutdown failed: {exc}')
 
 
-def main(argv=None):
+def main(argv=None, *, output_dir=None, quiet=False):
     args = parse_args(argv)  # 所有参数校验先于连接和输出操作。
     matches = detect_dynamometers() if DYNO_PORT == 'auto' else [DYNO_PORT]
     if len(matches) != 1:
         raise RuntimeError(f'Expected one dynamometer, found {matches}; set DYNO_PORT')
     result = {'reason': 'error'}
-    directory = Path(__file__).resolve().parent/'data'/f'{datetime.now():%Y%m%d-%H%M%S-%f}'
+    directory = (Path(output_dir) if output_dir is not None else
+                 Path(__file__).resolve().parent/'data'/f'{datetime.now():%Y%m%d-%H%M%S-%f}')
     directory.mkdir(parents=True)
     csv_path = directory/'kt_curve.csv'
     try:
@@ -249,12 +250,15 @@ def main(argv=None):
                 append_smoothed_columns(csv_path, SMOOTH_WINDOW_S, SMOOTH_WINDOW_S,
                                         FEEDBACK_TIMEOUT_S, SMOOTH_WINDOW_S, SMOOTH_WINDOW_S,
                                         output_columns=OUTPUT_COLUMNS)
-                pack_streams(csv_path)
+                pack_streams(csv_path, align_motor=True)
         except Exception as exc:
             if original is None:
                 raise
             original.add_note(f'CSV smoothing failed: {exc}')
-        print(f'Test result: {result["reason"]}\nCSV: {csv_path}')
+        if not quiet:
+            print(f'Test result: {result["reason"]}\nCSV: {csv_path}')
+    return {'reason': result['reason'], 'csv': str(csv_path),
+            'config': {k: v for k, v in globals().items() if k.isupper()}, 'arguments': vars(args)}
 
 
 if __name__ == '__main__':

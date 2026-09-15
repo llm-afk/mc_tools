@@ -285,9 +285,10 @@ class Experiment:
                 w.writerow([f'{(at-self.origin)*1000:.6f}', *values])
 
 
-def main(argv=None):
+def main(argv=None, *, output_dir=None, quiet=False):
     args = parse_args(argv)
-    directory = Path(__file__).resolve().parent/'data'/f'{datetime.now():%Y%m%d-%H%M%S-%f}'
+    directory = (Path(output_dir) if output_dir is not None else
+                 Path(__file__).resolve().parent/'data'/f'{datetime.now():%Y%m%d-%H%M%S-%f}')
     directory.mkdir(parents=True)
     result = dict(status='INVALID', reason='未完成', arguments=vars(args),
                   config={k: v for k, v in globals().items() if k.isupper()}, completed_pulses=0)
@@ -359,7 +360,8 @@ def main(argv=None):
             result.update(status='INVALID', reason=f'CSV写入失败: {exc}')
         with (directory/'result.json').open('x', encoding='utf-8') as f:
             json.dump(result, f, ensure_ascii=False, indent=2, allow_nan=False)
-        print_result(result, directory)
+        if not quiet:
+            print_result(result, directory)
     return result
 
 

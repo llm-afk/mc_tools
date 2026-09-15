@@ -124,3 +124,12 @@ USB DLC/回显/分片/合包、设备时序求解及启动失败释放。
 历史实机记录（2026-09-14）：ID 1 使用 `0x401`、tau=0.2 完成 1 秒实机运动，
 MIT 收发 985/985，约 981.7 Hz，错误码为零，最终失能收到 ACK。
 详见 [实机记录](hardware_validation_20260914.md)。
+# 电机SN只读接口
+
+`bench.motor(id).read_serial_number()` 在 `bench.start()` 前调用，不发送使能或写入命令。
+依次读取 `0x2004..0x200A`：请求ID `0x600+id`，数据 `40 idx_lo idx_hi 00 00 00 00 00`；
+响应ID `0x580+id`，4字节读取命令字 `0x43`，有效载荷为最后4字节。
+七段按索引顺序拼接28字节，按固件小端内存顺序得到26位ASCII字符串及末尾零填充。
+`read_serial_bytes()` 提供未解码的28字节；无效/未编程SN、SDO错误和超时均报错。
+核对来源：`c1_driver/Firmware_app/Source/com_can.c` 的SDO分支及 `od.c` 的OD表、Parse_Branch_From_SN。
+该SN是电机身份，CANable的USB SN仍由上层创建传输实例时指定。

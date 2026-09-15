@@ -18,18 +18,18 @@ Windows 调度会有抖动，不追赶补发；采集时间边界固定为 0～5
 反馈超时、电机报错、温度越限或采集溢出时尝试立即失能并关闭电源，不延长故障来执行斜坡。
 不使用堵转结束条件：这是固定时长的扭矩扫描。
 
-只生成 `data/<时间>/kt_curve.csv`，最终为两组连续的数据列：
+只生成 `data/<时间>/kt_curve.csv`，以电机时间为统一时间列：
 
 ```text
-motor_time_ms,motor_torque,motor_temperature_c,driver_temperature_c,motor_torque_smooth,dyno_time_ms,dyno_torque_nm,dyno_torque_smooth_nm
+time_ms,motor_torque,motor_temperature_c,driver_temperature_c,motor_application_target_torque,motor_torque_smooth,dyno_torque_nm,dyno_torque_smooth_nm
 ```
 
-电机第 N 帧和测功机第 N 帧并排，各组中间没有交替空行。按行号绘图即可；需要时间轴时，
-各组使用自己的 `motor_time_ms` / `dyno_time_ms`，时间原点相同。同一行不代表同时采样。
-帧数不同时只在较短组末尾留空。同一 USB 批次的相同时间戳和重复值均保留。最终 CSV 不输出速度、
-功率和实验配置列。固件扭矩单位不变；扭矩平滑只是趋势估计。
+全部电机帧保留，按接收时间一对一匹配测功机帧，每帧最多使用一次，多余帧舍弃。
+20ms内没有可用帧则留空，不复制旧值；原始扭矩和平滑值匹配同一测功机帧。
+平滑先在完整采样上计算，再匹配。目标列记录帧接收时最近一次应用下发目标。
+统一时间为主机接收时间，不等于硬件同步采样时间。
 
 比较不同关节时建议保持电源设定、最大目标、扭矩方向和传感器标定一致，记录多次扫描
-再评估重复性。动态反馈未同步，脚本不直接拿同一行两路数据计算“扭矩误差”。
+再评估重复性。总测报告按记录的目标与平滑测功机输出评估理想线偏差。
 
 本脚本已做离线模拟验证；真实装置的扭矩比例、阻尼建立时间和运行结果仍需实测。

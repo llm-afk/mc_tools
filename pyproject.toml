@@ -13,9 +13,13 @@ dependencies = []
 console = ["prompt-toolkit>=3.0.48,<4"]
 power = ["pyserial>=3.5,<4"]
 dynamometer = ["pyserial>=3.5,<4"]
+report = ["reportlab>=4,<5"]
 
 [tool.setuptools]
 include-package-data = false
 
 [tool.setuptools.packages.find]
 include = ["motor_platform*", "scripts*", "utils*"]
+
+[tool.setuptools.package-data]
+"scripts.factory_test" = ["assets/*.png"]

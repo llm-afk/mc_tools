@@ -133,11 +133,22 @@ python -m unittest discover -s tests -v
 输出出力保持率和 PASS/FAIL/异常。
 参数、流程与初始门槛见 [冲击测试说明](scripts/torque_impact/README.md)。
 
+## 电机出厂总测报告
+
+安装 `python -m pip install -e ".[console,power,dynamometer,report]"` 后运行：
+
+```powershell
+python -m scripts.factory_test --id 1 --serial <CANable SN> --torque 30
+```
+
+自动读取电机自身SN，依次执行扭矩输出误差和电机特性曲线测试。PNG报告、参数摘要和两项CSV
+统一保存至 `scripts/factory_test/data/YYYYMMDD_HHMMSS_电机SN/`。每项开始前核对电机SN，异常时停止后续测试。
+`python -m scripts.factory_test --preview` 仅生成模拟样张。扭矩输出误差标准为理想线偏差≤5%FS；
+电机特性曲线展示最大扭矩、最大转速和最大功率，不作PASS/FAIL判定。详见 [总测与报告说明](scripts/factory_test/README.md)。
+
 ## CSV 连续绘图
 
-T-N 和 KT 脚本将电机和测功机各自第 N 帧并排放在第 N 行。每组数据中间没有交替空行，
-全部真实帧保留；数量较少的组只在末尾留空。两组使用各自的时间列，同一行不表示同步采样。
-冲击脚本以电机时间为统一时间列，将时间邻近的测功机帧一对一匹配；测功机帧不会重复使用，
+T-N、KT和冲击脚本均以电机时间为统一时间列，将时间邻近的测功机帧一对一匹配；测功机帧不会重复使用，
 多余帧舍弃，20 ms 内无匹配则留空。三类脚本都不使用旧值填充或插值，MIT 控制台逐帧记录。
 
 转换以前的两路混排文件：`python -m utils.csv_streams "旧文件.csv"`。

@@ -125,6 +125,30 @@ class MotorBus:
                     return state
             raise TimeoutError(f"node {node_id}: no TPDO5 response to enabling RPDO")
 
+    def _read_serial(self, node_id, timeout):
+        """Read seven expedited SDO objects before starting the periodic runtime."""
+        _timeout(timeout)
+        with self._lock:
+            self._check()
+            if self._sdo_uncertain:
+                raise SdoError("previous SDO outcome uncertain; reopen the bus before reading SN")
+            chunks = []
+            for index in range(0x2004, 0x200B):
+                request = CanFrame(0x600 + node_id,
+                    b'\x40' + index.to_bytes(2, 'little') + b'\x00' * 5)
+                self._sdo_uncertain = True
+                try:
+                    self.transport.send(request)
+                    reply = self._wait_sdo(node_id, index, time.perf_counter() + timeout)
+                except SdoError:
+                    self._sdo_uncertain = False
+                    raise
+                if reply.data[0] != 0x43:
+                    raise SdoError(f"expected 4-byte SN response at 0x{index:04X}: {reply.data.hex()}")
+                self._sdo_uncertain = False
+                chunks.append(reply.data[4:8])
+            return b''.join(chunks)
+
     def _disable(self, node_id, timeout):
         deadline = time.perf_counter() + _timeout(timeout)
         with self._lock:
@@ -158,6 +182,18 @@ class Motor:
         self._samples_lock = threading.Lock()
         self._samples = None
         self._dropped_samples = 0
+
+    def read_serial_bytes(self, timeout=0.5):
+        """读取0x2004..0x200A共28字节；仅允许在bench.start()之前调用，不使能电机。"""
+        return self._bus._read_serial(self.node_id, timeout)
+
+    def read_serial_number(self, timeout=0.5):
+        """固件26位ASCII SN，按索引顺序拼接小端内存字节，末尾两字节为填充。"""
+        raw = self.read_serial_bytes(timeout)
+        value = raw.rstrip(b'\x00')
+        if len(value) != 26 or any(b < 33 or b > 126 for b in value):
+            raise SdoError(f"motor SN is not a programmed 26-character ASCII value: {raw.hex()}")
+        return value.decode('ascii')
 
     def start_recording(self, capacity=8192):
         """启用逐帧队列，供应用记录；state/last_state 仍只表示最新状态。

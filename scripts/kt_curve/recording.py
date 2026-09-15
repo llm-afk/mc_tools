@@ -2,11 +2,12 @@
 from bisect import bisect_right
 
 OUTPUT_COLUMNS = ['time_ms', 'dyno_torque_nm', 'motor_torque', 'motor_temperature_c',
-                  'driver_temperature_c', 'motor_torque_smooth', 'dyno_torque_smooth_nm']
+                  'driver_temperature_c', 'motor_application_target_torque',
+                  'motor_torque_smooth', 'dyno_torque_smooth_nm']
 
 COLUMNS = ['time_ms', 'dyno_torque_nm', 'dyno_speed_rad_s', 'dyno_power_w',
            'motor_speed_rad_s', 'motor_torque', 'motor_temperature_c',
-           'driver_temperature_c', 'application_target_torque', 'motor_id',
+           'driver_temperature_c', 'motor_application_target_torque', 'motor_id',
            'canable_serial', 'load_voltage_set_v', 'load_current_limit_a', 'result']
 
 
