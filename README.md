@@ -10,6 +10,7 @@ mc_tools/
 │  │  ├─ app.py               # ID、频率配置和控制流程
 │  │  ├─ console.py           # 终端反馈看板与命令编辑
 │  │  └─ data/                # 本脚本的反馈 CSV
+│  ├─ position_sweep/        # 回零、位置环扫频与逐包 CSV
 │  ├─ tn_curve/              # 电机 T-N 曲线实验
 │  ├─ kt_curve/              # 关节输出扭矩一致性实验
 │  └─ torque_impact/         # 转子与转子架粘接冲击实验
@@ -68,6 +69,22 @@ kp/kd 以实际增益填写，协议按 0.01 分辨率编码为 uint16。`--id/-
 
 应用每约 10 ms 刷新一次控制租约，CAN 周期目标默认 1 kHz；终端默认 10 Hz 刷新。CSV 保存应用读取到的
 全部真实反馈帧。退出、Ctrl+C 或异常时尝试失能；ACK 失败会作为错误报告。
+
+## 位置环扫频
+
+```powershell
+# 离线目标预览；不连接硬件，CSV 反馈列留空
+python -m scripts.position_sweep --preview --start-hz 0.2 --stop-hz 5 --duration 20 --amplitude 1 --kp 20 --kd 1
+
+# 实际运行：填写 CANable SN 和适合电机的增益
+python -m scripts.position_sweep --serial <CANable_SN> --id 1 --rate 1000 --start-hz 0.2 --stop-hz 5 --duration 20 --amplitude 1 --kp 20 --kd 1
+```
+
+先缓慢回到现有坐标零位并确认停稳，再渐入 ±1 rad 摆幅、连续线性扫频、渐出至零位并失能。
+实机由原生 C 线程定时计算目标并异步收发 USB，Python 负责配置、低频显示与停机后的 CSV 保存。
+零位停稳后每包反馈单独写一行 CSV，包含下发位置、kp/kd、上报位置/速度/扭矩、双温度和扫频频率，共 9 列。
+默认目标速度 / 前馈扭矩为零；`--velocity-mode derivative` 可同时下发轨迹速度。
+数据写入 `scripts/position_sweep/data/`，参数和命令关联边界见 [扫频说明](scripts/position_sweep/README.md)。
 
 ## 脚本内选择多个电机
 

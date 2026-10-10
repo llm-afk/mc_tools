@@ -61,6 +61,21 @@ with Bench(transport=Canable(CANABLE_SERIAL), motor_ids=[1]) as bench:
 - 周期运行时拥有总线后，旧的 `bench.motor()` 直接收发/`bench.poll()` 会拒绝调用，避免竞争。
   原先手动单帧接口仍可在没有周期运行时的情况下使用。新应用建议统一用 `control.motor()`。
 
+## 每次发送时生成轨迹目标
+
+`MotorChannel.set_mit_source(source, on_sent=None)` 是可选接口，现有 `set_mit()` 调用方式不变。
+调度线程仅在本次确实可以发送时调用 `source(now)`，参数为主机单调时间，返回完整的 `MitCommand`。
+迟到时按当前时间计算一个目标，不回放漏掉的轨迹点；反馈限流或租约过期时不会调用生成器。
+
+`on_sent(sent_at, command)` 在对应 USB 写成功返回后调用，用于记录提交的目标和主机时间。
+回调不代表 CAN 线上发送完成或电机执行确认。两个回调都运行在 I/O 线程中，必须快速返回，不能进行文件、
+终端、USB 操作或调用同步使能/失能；如需保存数据，应只放入有界队列。回调抛异常或返回非法目标会停止运行时并尝试失能。
+
+应用仍需在 `command_timeout` 内重复调用 `set_mit_source()` 续租，后台执行生成器本身不会延长租约。
+`set_mit()` 会取消生成器，重新 `enable()` 也会将目标恢复为全零并取消生成器及回调。
+该观察接口只覆盖周期发送，不覆盖使能过程中的中性帧。`scripts/position_sweep/` 的非 USB 模拟路径使用此接口；
+其真实 CANable 扫频已使用独立原生执行模块，不依赖 Python 周期调度。
+
 ## 可观察指标
 
 `stats()` 包括 `target_hz`、`actual_tx_hz`、`tx_count`、`rx_count`、`enabled`、`skipped_periods`、

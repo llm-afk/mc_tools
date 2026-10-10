@@ -3,7 +3,7 @@
 Python/Windows scheduling is best effort. No catch-up bursts or hard real-time guarantee.
 """
 from concurrent.futures import Future
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 import math
 import queue
 import threading
@@ -25,6 +25,10 @@ class Stats:
     skipped_periods: int = 0
     feedback_limited_periods: int = 0
     max_lateness_s: float = 0.0
+    max_tx_gap_s: float = 0.0
+    tx_gaps_over_5ms: int = 0
+    max_source_s: float = 0.0
+    max_usb_write_s: float = 0.0
     first_tx_at: float = 0.0
     last_tx_at: float = 0.0
     fault: str | None = None
@@ -37,10 +41,12 @@ class MotorChannel:
         self.name = name
         self._rate_hz = rate_hz
         self._target = MitCommand()
+        self._source = self._on_sent = None
         self._active = False
         self._expires = self._next = 0.0
         self._inflight = 0
         self._last_rx = 0.0
+        self._gap_anchor = None
         self._stats = Stats()
 
     @property
@@ -63,6 +69,23 @@ class MotorChannel:
         with self._runtime._lock:
             self._runtime._check()
             self._target = command
+            self._source = self._on_sent = None
+            self._expires = time.perf_counter() + self._runtime.command_timeout
+
+    def set_mit_source(self, source, *, on_sent=None):
+        """Evaluate source(monotonic_time) on each actual periodic send.
+
+        Both callbacks run on the CAN worker: keep them bounded and free of I/O.
+        on_sent(sent_at, command) runs only after a successful USB write; this
+        is not proof of motor execution. Refresh this call within the normal
+        application lease. set_mit() and enable() restore constant targets.
+        Callback/command errors stop the worker and trigger its normal cleanup.
+        """
+        if not callable(source) or (on_sent is not None and not callable(on_sent)):
+            raise TypeError("source/on_sent must be callable")
+        with self._runtime._lock:
+            self._runtime._check()
+            self._source, self._on_sent = source, on_sent
             self._expires = time.perf_counter() + self._runtime.command_timeout
 
     def enable(self, timeout=0.1):
@@ -93,7 +116,10 @@ class MotorChannel:
 
     def stats(self):
         with self._runtime._lock:
-            data = asdict(self._stats)
+            # Scalar fields only: avoid recursive deepcopy while holding the I/O lock.
+            data = vars(self._stats).copy()
+            data['max_poll_s'] = self._runtime._max_poll_s
+            data['max_poll_overrun_s'] = self._runtime._max_poll_overrun_s
             data['recording_dropped'] = self._motor.recording_dropped
             data['can_counter_reports'] = getattr(self._runtime._bus.transport, 'counter_reports', 0)
             data['can_protocol_reports'] = getattr(self._runtime._bus.transport, 'protocol_reports', 0)
@@ -119,6 +145,7 @@ class ControlRuntime:
         self._ready = threading.Event()
         self._queue = queue.Queue(maxsize=32)
         self._error = None
+        self._max_poll_s = self._max_poll_overrun_s = 0.0
         self._touched = set()
         self._channels = {name: MotorChannel(self, name, m, self.rate_hz) for name, m in motors.items()}
         self._by_id = {c.node_id: c for c in self._channels.values()}
@@ -165,9 +192,11 @@ class ControlRuntime:
                 channel._motor.enable(timeout)
                 with self._lock:
                     channel._target = MitCommand()
+                    channel._source = channel._on_sent = None
                     channel._expires = time.perf_counter() + self.command_timeout
                     channel._next = time.perf_counter()
                     channel._inflight = 0
+                    channel._gap_anchor = None
                     channel._last_rx = time.perf_counter()
                     channel._active = True
                     channel._stats.fault = None
@@ -197,16 +226,32 @@ class ControlRuntime:
                             raise TimeoutError(f"{channel.name}: feedback not keeping up for 100 ms")
                         continue
                     target, due, period = channel._target, channel._next, 1/channel._rate_hz
+                    source, on_sent = channel._source, channel._on_sent
             if expired:
                 # Do not wait for an ACK while other motors have scheduled traffic.
                 channel._motor.disable(wait_ack=False)
                 continue
+            generated = time.perf_counter()
+            if source is not None:
+                target = source(generated)
+                if not isinstance(target, MitCommand):
+                    raise TypeError("MIT source must return MitCommand")
+            write_started = time.perf_counter()
             channel._motor.send_mit(target)
             sent = time.perf_counter()
+            if on_sent is not None:
+                on_sent(sent, target)
             with self._lock:
                 elapsed_periods = max(1, math.floor((sent-due)/period)+1)
                 channel._next = due + elapsed_periods*period
                 stats = channel._stats
+                if channel._gap_anchor is not None:
+                    gap = sent-channel._gap_anchor
+                    stats.max_tx_gap_s = max(stats.max_tx_gap_s, gap)
+                    stats.tx_gaps_over_5ms += int(gap > 0.005)
+                channel._gap_anchor = sent
+                stats.max_source_s = max(stats.max_source_s, write_started-generated)
+                stats.max_usb_write_s = max(stats.max_usb_write_s, sent-write_started)
                 stats.tx_count += 1
                 channel._inflight += 1
                 stats.skipped_periods += elapsed_periods-1
@@ -233,7 +278,12 @@ class ControlRuntime:
                 with self._lock:
                     deadlines = [min(c._next,c._expires) for c in self._channels.values() if c._active]
                 remaining = min(0.005, max(0.000001, min(deadlines)-time.perf_counter())) if deadlines else 0.005
+                poll_started = time.perf_counter()
                 state = self._bus.poll(remaining)
+                poll_elapsed = time.perf_counter()-poll_started
+                with self._lock:
+                    self._max_poll_s = max(self._max_poll_s, poll_elapsed)
+                    self._max_poll_overrun_s = max(self._max_poll_overrun_s, poll_elapsed-remaining)
                 if state is not None:
                     with self._lock:
                         channel = self._by_id[state.node_id]

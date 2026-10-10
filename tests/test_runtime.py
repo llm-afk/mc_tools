@@ -48,6 +48,41 @@ class Transport:
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_usb_receive_does_not_sleep_near_send_deadline(self):
+        usb = _Usb.__new__(_Usb)
+        usb._event = 1
+        usb._issue_read = lambda: None
+        usb.k = SimpleNamespace(WaitForSingleObject=lambda *args: 258)
+        for timeout, clock, expected_sleeps in (
+            (.001, [0, .0007, .0011], []),
+            (.01, [0, .001, .011], [.001]),
+        ):
+            with self.subTest(timeout=timeout), \
+                 patch('motor_platform.transports.canable.time.perf_counter', side_effect=clock), \
+                 patch('motor_platform.transports.canable.time.sleep') as sleep:
+                self.assertIsNone(usb._read_async(timeout))
+                self.assertEqual([call.args[0] for call in sleep.call_args_list], expected_sleeps)
+
+    def test_usb_write_timeout_cached_and_short_write_still_rejected(self):
+        usb = _Usb.__new__(_Usb)
+        usb.usb = 2
+        usb._write_timeouts = {}
+        policies = []
+        def policy(h, pipe, kind, size, value):
+            policies.append((pipe, value._obj.value))
+            return True
+        def write(h, pipe, buf, size, n, overlapped):
+            n._obj.value = size
+            return True
+        usb.w = SimpleNamespace(WinUsb_SetPipePolicy=policy, WinUsb_WritePipe=write)
+        for _ in range(10):
+            self.assertEqual(usb.transfer(2, b'abc'), b'abc')
+        usb.transfer(2, b'abc', timeout=.2)
+        self.assertEqual(policies, [(2, 100), (2, 200)])
+        usb.w.WinUsb_WritePipe = lambda *args: True
+        with self.assertRaisesRegex(OSError, 'short USB write'):
+            usb.transfer(2, b'abc', timeout=.2)
+
     def test_usb_poll_timeout_preserves_pending_read(self):
         usb=_Usb.__new__(_Usb)
         calls=[]

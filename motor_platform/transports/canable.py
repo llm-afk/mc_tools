@@ -16,6 +16,7 @@ import time
 from ..core.can import CanFrame
 
 DLC_LENGTHS = (*range(9), 12, 16, 20, 24, 32, 48, 64)
+SUPPORTED_FIRMWARE = ("0x260618", "0x260803", "0x261001")
 
 
 class Setup(C.Structure):
@@ -73,6 +74,7 @@ class _Usb:
         self.usb = h()
         self._event = None
         self._pending = False
+        self._write_timeouts = {}
         try:
             _check(self.w.WinUsb_Initialize(self.handle, C.byref(self.usb)))
             pipes = []
@@ -112,21 +114,16 @@ class _Usb:
             raise ValueError("USB timeout must be finite and positive")
         if data is None:
             return self._read_async(timeout)
-        milliseconds = C.c_uint32(min(0xFFFFFFFF, max(1, math.ceil(timeout * 1000))))
-        _check(self.w.WinUsb_SetPipePolicy(self.usb, pipe, 3, 4, C.byref(milliseconds)))
-        incoming = data is None
-        size = self.read_size if incoming else len(data)
-        buf = C.create_string_buffer(size) if incoming else C.create_string_buffer(data, size)
+        milliseconds = min(0xFFFFFFFF, max(1, math.ceil(timeout * 1000)))
+        if self._write_timeouts.get(pipe) != milliseconds:
+            value = C.c_uint32(milliseconds)
+            _check(self.w.WinUsb_SetPipePolicy(self.usb, pipe, 3, 4, C.byref(value)))
+            self._write_timeouts[pipe] = milliseconds
+        size = len(data)
+        buf = C.create_string_buffer(data, size)
         n = C.c_uint32()
-        fn = self.w.WinUsb_ReadPipe if incoming else self.w.WinUsb_WritePipe
-        if not fn(self.usb, pipe, buf, size, C.byref(n), None):
-            error = C.get_last_error()
-            if incoming and error == 121:  # ERROR_SEM_TIMEOUT
-                if n.value:
-                    raise OSError("partial USB read timed out; reopen transport")
-                return None
-            raise C.WinError(error)
-        if not incoming and n.value != size:
+        _check(self.w.WinUsb_WritePipe(self.usb, pipe, buf, size, C.byref(n), None))
+        if n.value != size:
             raise OSError("short USB write; CAN transmission outcome uncertain")
         return buf.raw[:n.value]
 
@@ -148,7 +145,12 @@ class _Usb:
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
                 return None
-            time.sleep(min(remaining, 0.0001))
+            # A 100 us Python sleep measured ~0.54 ms on the target Windows
+            # host, and can overshoot the next TX deadline. Keep the final
+            # 600 us awake, polling the overlapped event (ctypes releases GIL).
+            # Longer waits still sleep, so idle/SDO waits do not busy-spin.
+            if remaining > 0.0006:
+                time.sleep(min(remaining - 0.0006, 0.001))
 
     def _issue_read(self):
         if not self._pending:
@@ -160,13 +162,17 @@ class _Usb:
                 raise C.WinError(C.get_last_error())
             self._pending = True
 
-    def close(self):
+    def suspend_read(self):
+        """Complete/cancel IN before an exclusive native owner takes this handle."""
         if self._pending:
             # Do not free OVERLAPPED/event/buffer until cancellation has completed.
             self.k.CancelIoEx(self.handle, C.byref(self._overlapped))
             n = C.c_uint32()
             self.w.WinUsb_GetOverlappedResult(self.usb, C.byref(self._overlapped), C.byref(n), True)
             self._pending = False
+
+    def close(self):
+        self.suspend_read()
         if self._event:
             self.k.CloseHandle(self._event)
             self._event = None
@@ -316,9 +322,10 @@ ConvertTo-Json -InputObject $items -Compress
         self._usb = self._connect()
         try:
             self.info = self._info(self._usb)
-            if (self.info["channels"] != 1 or self.info["firmware"] not in {"0x260803", "0x260618"}
+            if (self.info["channels"] != 1 or self.info["firmware"] not in SUPPORTED_FIRMWARE
                     or int(self.info["features"], 16) & 0x4500 != 0x4500):
-                raise OSError(f"unsupported CANable capabilities/firmware: {self.info}; supported firmware: 0x260803, 0x260618")
+                raise OSError(f"unsupported CANable capabilities/firmware: {self.info}; "
+                              f"supported firmware: {', '.join(SUPPORTED_FIRMWARE)}")
             nominal = bit_timing(self.info["clock_hz"], bitrate, sample_point, self.info["nominal_limits"])
             data = bit_timing(self.info["clock_hz"], data_bitrate, data_sample_point, self.info["data_limits"])
             self._configured = True

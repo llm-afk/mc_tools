@@ -23,3 +23,4 @@ include = ["motor_platform*", "scripts*", "utils*"]
 
 [tool.setuptools.package-data]
 "scripts.factory_test" = ["assets/*.png"]
+"scripts.position_sweep" = ["native_engine.c"]

@@ -22,7 +22,12 @@ python -m unittest discover -s tests -v
 2026-09-14 本次会话直接 WinUSB 实测基线：`1D50:606F`，产品 `Candlelight 2.5 - Multiboard`，
 序列号 `20903498384550052`，固件 `0x260803`，硬件 `0x200`，HAL `1.2.5`，单通道，
 能力 `0xE53B`，CAN 时钟 160 MHz。实际连接时重新读取，不能用这个快照替代设备查询。
-当前后端的 `open()` 限定这一固件版本及单通道能力；更换固件需重新验证 USB 协议。
+当前后端的 `open()` 接受 `0x260618`、`0x260803`、`0x261001`，并检查单通道和所需能力位。
+`0x261001` 于 2026-10-10 根据用户设备报告及本地作者 SDK 的 legacy 兼容说明补入；
+版本识别和初始化路径已做模拟回归；同日已在 SN `20923378374350012` 上完成原生扫频 CAN 收发、回零及失能 ACK 验证。
+短时小摆幅测试覆盖 ±0.1 rad、0.2→2 Hz；这不代表所有负载、频率或固件功能都已验证。
+依据：桌面 `canable-sdk/vendor/elmue_canable_sdk/User & Developer Manual.htm` 的 legacy 默认兼容说明，
+以及 `SampleApplication Python/Source/Candlelight_def.py` 的请求定义（包括 legacy 可用的请求 22）。
 
 本机 `candle-api==0.0.12` 本次枚举结果为空，因而采用 Python ctypes 直接调用 WinUSB。
 使用固件提供的 legacy gs_usb CAN FD 格式，未开启 Elmue blobs 或 USB 硬件时间戳。

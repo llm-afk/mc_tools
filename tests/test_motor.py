@@ -222,7 +222,9 @@ class UsbTests(unittest.TestCase):
                 if self.fail and request == 10: raise OSError("simulated USB failure")
                 return b"\x02" if request == 22 else b""
             def close(self): self.closed = True
-        for fail in (False, True):
+        for firmware, fail in ((version, failure) for version in ("0x260618", "0x260803", "0x261001")
+                               for failure in (False, True)):
+            info["firmware"] = firmware
             usb, can = Usb(fail), Canable()
             with patch.object(can, "_connect", return_value=usb), patch.object(can, "_info", return_value=info):
                 if fail:
@@ -236,6 +238,24 @@ class UsbTests(unittest.TestCase):
                     can.close()
                 self.assertEqual(usb.calls[-1], (2, struct.pack("<II", 0, 0)))
                 self.assertTrue(usb.closed)
+
+    def test_new_firmware_does_not_bypass_capability_checks(self):
+        baseline = dict(firmware="0x261001", channels=1, features="0xE53B", clock_hz=160_000_000,
+                        nominal_limits=(1,256,1,128,128,1,512,1), data_limits=(1,32,1,16,16,1,32,1))
+        class Usb:
+            def __init__(self): self.closed = False
+            def control(self, *args, **kwargs):
+                raise AssertionError("unsupported adapter must not be configured")
+            def close(self): self.closed = True
+        for change in ({"firmware": "0xFFFFFF"}, {"channels": 2}, {"features": "0xE43B"}):
+            with self.subTest(change=change):
+                usb, can = Usb(), Canable()
+                with patch.object(can, "_connect", return_value=usb), \
+                     patch.object(can, "_info", return_value=baseline | change):
+                    with self.assertRaisesRegex(OSError, "unsupported CANable"):
+                        can.open()
+                self.assertTrue(usb.closed)
+                self.assertIsNone(can._usb)
 
 
 if __name__ == "__main__":
