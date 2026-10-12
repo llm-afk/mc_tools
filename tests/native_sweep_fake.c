@@ -6,7 +6,7 @@
 #include "../scripts/position_sweep/native_engine.c"
 
 static unsigned char queued[76];
-static int available, mode, sends;
+static int available, mode, sends, pd_seen;
 static PUCHAR waiting;
 static LPOVERLAPPED waiting_ov;
 static LPOVERLAPPED waiting_tx;
@@ -38,7 +38,17 @@ BOOL WINAPI FakeWrite(WINUSB_INTERFACE_HANDLE u,UCHAR pipe,PUCHAR data,ULONG siz
         if (mode==1 && sends>5) return TRUE;
         id=0x191; queued[8]=11;
         position=mode==4 ? 1.f : f32(data+12);
+        if(u16(data+24)) pd_seen=1;
+        int pure_ff=u16(data+24)==0 && u16(data+26)==0;
+        if(mode==10 && pure_ff) position=1;
         memcpy(queued+12,&position,4);
+        memcpy(queued+20,data+20,4);
+        if(mode==9) { float velocity=10; memcpy(queued+16,&velocity,4); }
+        if(mode==11 && pure_ff) { float velocity=10; memcpy(queued+16,&velocity,4); }
+        if(mode==8 && pure_ff && (!pd_seen || f32(data+12)!=0 || f32(data+16)!=0)) {
+            SetLastError(ERROR_INVALID_DATA); return FALSE;
+        }
+        if(mode==8 && !pure_ff && f32(data+20)!=0) { SetLastError(ERROR_INVALID_DATA); return FALSE; }
         int16_t temp=(mode==3 && sends>5)?850:260;
         memcpy(queued+24,&temp,2); memcpy(queued+26,&temp,2);
         if(mode==2 && sends>5) queued[28]=1;
@@ -59,6 +69,6 @@ BOOL WINAPI FakeResult(WINUSB_INTERFACE_HANDLE u,LPOVERLAPPED ov,LPDWORD n,BOOL 
     return TRUE;
 }
 API int simulate(int scenario,const Config *c,Row *rows,uint64_t capacity,Stats *s,Control *ctl) {
-    available=sends=0; waiting=NULL; waiting_tx=NULL; mode=scenario; position=0;
+    available=sends=pd_seen=0; waiting=NULL; waiting_tx=NULL; mode=scenario; position=0;
     return sweep_run(NULL,NULL,0x81,2,c,rows,capacity,s,ctl);
 }

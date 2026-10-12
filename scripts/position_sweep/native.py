@@ -16,7 +16,8 @@ class Config(C.Structure):
         'rate f0 f1 duration amplitude ramp home_position home_duration settle '
         'home_timeout position_tolerance velocity_tolerance motor_temperature '
         'driver_temperature feedback_timeout lease').split()] + [
-        (name, C.c_uint32) for name in ('id', 'kp', 'kd', 'derivative')]
+        (name, C.c_uint32) for name in ('id', 'kp', 'kd', 'derivative')] + [
+        ('max_travel', C.c_double), ('max_velocity', C.c_double), ('feedforward', C.c_uint32)]
 
 
 class Row(C.Structure):
@@ -26,7 +27,7 @@ class Row(C.Structure):
 
 class Stats(C.Structure):
     _fields_ = [(name, C.c_uint64) for name in 'tx rx rows skipped gaps limited counters'.split()] + [
-        (name, C.c_double) for name in 'first_tx last_tx max_gap max_write first_rx last_rx max_submit'.split()] + [
+        (name, C.c_double) for name in 'first_tx last_tx max_gap max_write first_rx last_rx max_submit motion_origin'.split()] + [
         (name, C.c_uint32) for name in ('code', 'win_error', 'disable_ack')]
 
 
@@ -78,18 +79,23 @@ def load_engine():
 
 
 def config_from_args(args, position):
+    kp = args.home_kp if getattr(args, 'feedforward', False) else args.kp
+    kd = args.home_kd if getattr(args, 'feedforward', False) else args.kd
     home = Home(position, args.home_speed, args.kp, args.kd, args.velocity_mode)
     return Config(args.rate, args.start_hz, args.stop_hz, args.duration, args.amplitude,
                   args.ramp, position, home.duration, args.settle, args.home_timeout,
                   args.zero_tolerance, args.zero_velocity, args.max_motor_temp,
-                  args.max_driver_temp, .1, .25, args.id, round(args.kp*100),
-                  round(args.kd*100), int(args.velocity_mode=='derivative'))
+                  args.max_driver_temp, .1, .25, args.id, round(kp*100),
+                  round(kd*100), int(args.velocity_mode=='derivative'),
+                  getattr(args, 'max_travel', 0), getattr(args, 'max_velocity', 0),
+                  int(getattr(args, 'feedforward', False)))
 
 
 ERRORS = {1: 'cancelled', 2: 'USB transfer failed', 3: 'invalid feedback or CAN error',
           4: 'motor fault', 5: 'temperature limit', 6: 'feedback timeout',
           7: 'application lease expired', 8: 'motor did not settle at zero',
-          9: 'CSV memory buffer full', 10: 'disable ACK not received'}
+          9: 'CSV memory buffer full', 10: 'disable ACK not received',
+          11: 'feedforward travel or velocity limit'}
 
 
 def run_native(bench, recorder, args):
@@ -122,7 +128,9 @@ def run_native(bench, recorder, args):
             finally:
                 finished.set()
         thread = threading.Thread(target=worker, name='native-sweep', daemon=False)
-        print('Native engine: homing -> sweep -> return to zero; Ctrl+C stops and saves.', flush=True)
+        flow = ('PD homing -> settle -> zero-gain feedforward sweep -> disable' if config.feedforward
+                else 'homing -> sweep -> return to zero')
+        print(f'Native engine: {flow}; Ctrl+C stops and saves.', flush=True)
         bus._io_owner = thread
         try:
             thread.start()
@@ -146,8 +154,16 @@ def run_native(bench, recorder, args):
             if interrupted or stats.code == 1:
                 raise KeyboardInterrupt
             if stats.code:
+                detail = ''
+                if stats.code == 11 and stats.rows:
+                    last = next((rows[i] for i in range(stats.rows)
+                                 if (config.max_travel > 0 and abs(rows[i].position-stats.motion_origin) >= config.max_travel)
+                                 or abs(rows[i].velocity) >= config.max_velocity), rows[stats.rows-1])
+                    travel_limit = f'{config.max_travel:g} rad' if config.max_travel > 0 else 'disabled'
+                    detail = (f'; travel={abs(last.position-stats.motion_origin):.6g} rad, limit={travel_limit}; speed={abs(last.velocity):.6g}/'
+                              f'{config.max_velocity:g} rad/s')
                 raise RuntimeError(f'native sweep: {ERRORS.get(stats.code, stats.code)}; '
-                                   f'Win32={stats.win_error}; disable_ack={bool(stats.disable_ack)}')
+                                   f'Win32={stats.win_error}; disable_ack={bool(stats.disable_ack)}{detail}')
         finally:
             dll.sweep_stop(C.byref(control))
             # Do not close/free USB, arrays or OVERLAPPED while native code runs.

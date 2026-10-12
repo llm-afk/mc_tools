@@ -43,9 +43,11 @@ class NativeSweepTests(unittest.TestCase):
                 self.assertAlmostEqual(self.dll.sweep_frequency(C.byref(c),t),
                                        plan.sample(t).frequency_hz,places=10)
 
-    def simulate(self,scenario=0,capacity=1000,stop=False,expired=False):
+    def simulate(self,scenario=0,capacity=1000,stop=False,expired=False,feedforward=False,max_travel=.5):
         c=self.config()
         c.home_duration=.002;c.settle=.002;c.duration=.01;c.ramp=.002;c.home_timeout=.03
+        if feedforward:
+            c.feedforward=1;c.home_position=.2;c.max_travel=max_travel;c.max_velocity=5
         rows=(native.Row*capacity)();s=native.Stats();ctl=native.Control()
         if not expired:self.dll.sweep_heartbeat(C.byref(ctl))
         if stop:self.dll.sweep_stop(C.byref(ctl))
@@ -79,3 +81,21 @@ class NativeSweepTests(unittest.TestCase):
         self.assertEqual(code,0)
         self.assertGreater(stats.rx,10)
         self.assertEqual(self.simulate(7)[0],2)
+
+    def test_feedforward_uses_only_torque_field_and_checks_motion_limits(self):
+        code,rows,stats=self.simulate(8,feedforward=True)
+        self.assertEqual(code,0)
+        self.assertGreater(stats.rows,2)
+        self.assertLess(stats.rows,stats.rx)  # PD homing feedback is excluded.
+        self.assertAlmostEqual(stats.motion_origin,0)
+        self.assertTrue(any(rows[i].target!=0 for i in range(stats.rows)))
+        for i in range(stats.rows):
+            self.assertEqual((rows[i].kp,rows[i].kd,rows[i].position),(0,0,0))
+            self.assertEqual(rows[i].torque,rows[i].target)
+        for scenario in (10,11):
+            self.assertEqual(self.simulate(scenario,feedforward=True)[0],11)
+        self.assertEqual(self.simulate(10,feedforward=True,max_travel=0)[0],0)
+        self.assertEqual(self.simulate(11,feedforward=True,max_travel=0)[0],11)
+        code,_,stats=self.simulate(4,feedforward=True)
+        self.assertEqual(code,8)
+        self.assertEqual(stats.rows,0)  # Failed homing must not enter the sweep.

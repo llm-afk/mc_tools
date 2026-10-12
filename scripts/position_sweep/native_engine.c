@@ -13,11 +13,13 @@ typedef struct {
     double settle, home_timeout, position_tolerance, velocity_tolerance;
     double motor_temperature, driver_temperature, feedback_timeout, lease;
     uint32_t id, kp, kd, derivative;
+    double max_travel, max_velocity;
+    uint32_t feedforward;
 } Config;
 typedef struct { double target, kp, kd, position, velocity, torque, mt, bt, at, frequency; } Row;
 typedef struct {
     uint64_t tx, rx, rows, skipped, gaps, limited, counters;
-    double first_tx, last_tx, max_gap, max_write, first_rx, last_rx, max_submit;
+    double first_tx, last_tx, max_gap, max_write, first_rx, last_rx, max_submit, motion_origin;
     uint32_t code, win_error, disable_ack;
 } Stats;
 typedef struct { volatile LONG stop; volatile LONG64 heartbeat, frequency_bits; } Control;
@@ -104,7 +106,8 @@ static int finish_tx(void *usb, OVERLAPPED *ov, Stats *s, double started,
 
 /* Codes: 0 complete, 1 cancelled, 2 USB, 3 malformed/CAN error, 4 motor fault,
  * 5 temperature, 6 stale feedback, 7 lease, 8 zero timeout, 9 buffer full,
- * 10 disable unconfirmed. Save all captured packets up to a failure. */
+ * 10 disable unconfirmed, 11 feedforward travel/velocity limit.
+ * Save all captured packets up to a failure. */
 API int sweep_run(void *usb, void *file, unsigned input, unsigned output,
                   const Config *c, Row *rows, uint64_t capacity, Stats *s, Control *ctl) {
     unsigned char incoming[2048], buffer[4096], tx[76]={0}, disable[76]={0};
@@ -112,6 +115,7 @@ API int sweep_run(void *usb, void *file, unsigned input, unsigned output,
     OVERLAPPED ov={0}, txov={0};
     int pending=0, tx_pending=0, stage=0, capture=0, done=0, inflight=0;
     double tx_started=0, next_target=0, next_frequency=0, target_frequency=0;
+    int next_feedforward=0;
     uint32_t echo=1; double target=0, start=seconds(), due=start, last_rx=start, stable=-1;
     double period=1/c->rate, end=start+c->home_duration;
     LARGE_INTEGER frequency; QueryPerformanceFrequency(&frequency);
@@ -136,12 +140,14 @@ API int sweep_run(void *usb, void *file, unsigned input, unsigned output,
         if (now-heartbeat>c->lease) { s->code=7; break; }
         if (now-last_rx>c->feedback_timeout) { s->code=6; break; }
         if (now>end+c->home_timeout) { s->code=8; break; }
+        if (c->feedforward && stage && now>=end) break;
         if (tx_pending) {
             DWORD ready=WaitForSingleObject(txov.hEvent,0);
             if (ready==WAIT_OBJECT_0) {
                 tx_pending=0;
                 if (!finish_tx(usb,&txov,s,tx_started,next_target,&target,&due,period)) { s->code=2; break; }
                 target_frequency=next_frequency; publish_frequency(ctl,target_frequency);
+                if (next_feedforward) capture=1;
             } else if (ready!=WAIT_TIMEOUT || now-tx_started>.05) {
                 s->code=2; s->win_error=ready==WAIT_TIMEOUT ? ERROR_SEM_TIMEOUT : GetLastError(); break;
             }
@@ -158,7 +164,14 @@ API int sweep_run(void *usb, void *file, unsigned input, unsigned output,
                 }
                 float pf=(float)p,vf=(float)v;
                 memcpy(tx,&echo,4); echo=echo%255+1;
-                memcpy(tx+12,&pf,4); memcpy(tx+16,&vf,4);
+                next_feedforward=c->feedforward && stage;
+                memset(tx+12,0,16);
+                if (next_feedforward) memcpy(tx+20,&pf,4);
+                else {
+                    uint16_t kp=(uint16_t)c->kp, kd=(uint16_t)c->kd;
+                    memcpy(tx+12,&pf,4); memcpy(tx+16,&vf,4);
+                    memcpy(tx+24,&kp,2); memcpy(tx+26,&kd,2);
+                }
                 ResetEvent(txov.hEvent); next_target=pf; tx_started=seconds();
                 BOOL ok=WinUsb_WritePipe(usb,(UCHAR)output,tx,76,NULL,&txov);
                 DWORD error=ok ? 0 : GetLastError();
@@ -169,6 +182,7 @@ API int sweep_run(void *usb, void *file, unsigned input, unsigned output,
                     tx_pending=0;
                     if (!finish_tx(usb,&txov,s,tx_started,next_target,&target,&due,period)) { s->code=2; break; }
                     target_frequency=next_frequency; publish_frequency(ctl,target_frequency);
+                    if (next_feedforward) capture=1;
                 }
             }
         }
@@ -206,18 +220,25 @@ API int sweep_run(void *usb, void *file, unsigned input, unsigned output,
                         s->rx++; last_rx=at; if (inflight) inflight--;
                         if (capture) {
                             if (s->rows>=capacity) { s->code=9; done=1; break; }
-                            rows[s->rows++]=(Row){target,c->kp/100.,c->kd/100.,pos,vel,torque,mt,bt,at,target_frequency};
+                            rows[s->rows++]=(Row){target,c->feedforward?0:c->kp/100.,c->feedforward?0:c->kd/100.,pos,vel,torque,mt,bt,at,target_frequency};
                             if (s->rows==1) s->first_rx=at;
                             s->last_rx=at;
                         }
                         if (p[8]==11 && u16(p+28)) { s->code=4; done=1; break; }
                         if (mt>=c->motor_temperature || bt>=c->driver_temperature) { s->code=5; done=1; break; }
-                        if (at>=end) {
+                        if (c->feedforward && stage && ((c->max_travel>0 && fabs(pos-s->motion_origin)>=c->max_travel) || fabs(vel)>=c->max_velocity)) {
+                            s->code=11; done=1; break;
+                        }
+                        if ((!c->feedforward || !stage) && at>=end) {
                             if (fabs(pos)<=c->position_tolerance && fabs(vel)<=c->velocity_tolerance) {
                                 if (stable<0) stable=at;
                                 if (at-stable>=c->settle) {
                                     if (stage) done=1;
-                                    else { stage=capture=1; start=at; end=at+c->duration+2*c->ramp; stable=-1; }
+                                    else {
+                                        stage=1; capture=c->feedforward?0:1;
+                                        s->motion_origin=pos;
+                                        start=at; end=at+c->duration+2*c->ramp; stable=-1;
+                                    }
                                 }
                             } else stable=-1;
                         }
@@ -257,7 +278,7 @@ stop_motor:
                     else if (capture && id==0x190+c->id && (p[10]&2) && (p[8]==10 || p[8]==11)) {
                         double pos=f32(p+12),vel=f32(p+16),torque=f32(p+20),at=seconds();
                         if (isfinite(pos)&&isfinite(vel)&&isfinite(torque) && s->rows<capacity) {
-                            rows[s->rows++]=(Row){target,c->kp/100.,c->kd/100.,pos,vel,torque,i16(p+24)/10.,i16(p+26)/10.,at,target_frequency};
+                            rows[s->rows++]=(Row){target,c->feedforward?0:c->kp/100.,c->feedforward?0:c->kd/100.,pos,vel,torque,i16(p+24)/10.,i16(p+26)/10.,at,target_frequency};
                             s->rx++; if(s->rows==1) s->first_rx=at; s->last_rx=at;
                         } else if (!s->code) s->code=9;
                     }
