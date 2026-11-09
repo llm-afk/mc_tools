@@ -11,6 +11,7 @@ import argparse
 from datetime import datetime
 import json
 import math
+import secrets
 from pathlib import Path
 import sys
 import time
@@ -36,12 +37,14 @@ def read_motor_sn(args):
         return bench.motor(args.id).read_serial_number()
 
 
-def create_output_directory(root, motor_sn, now=None):
+def create_output_directory(root, motor_sn, now=None, *, unique=False):
     """按YYYYMMDD_HHMMSS_电机SN命名；同一秒重复创建时追加序号。"""
     now = datetime.now() if now is None else now
     safe_sn = ''.join(ch if ch.isalnum() or ch in '-_' else '_' for ch in str(motor_sn))
     safe_sn = safe_sn.strip(' ._') or 'UNKNOWN'
     base = f'{now:%Y%m%d_%H%M%S}_{safe_sn}'
+    if unique:
+        base += '_'+str(secrets.randbits(64))
     root = Path(root)
     for index in range(1000):
         directory = root / (base if index == 0 else f'{base}_{index+1}')
@@ -109,6 +112,8 @@ def execute(args, directory, *, stages=STAGES, identify=read_motor_sn, pause=tim
             if i+1 < len(stages):
                 pause(BETWEEN_TESTS_S)
     except (Exception, KeyboardInterrupt) as exc:
+        from scripts.factory_test.diagnostics import log_event
+        log_event('test.exception', '性能测试异常', level='ERROR', error=exc, stages=summary['stages'])
         summary['error'] = str(exc) or '用户中止'
         summary['error_notes'] = getattr(exc, '__notes__', [])
         for stage in summary['stages'].values():

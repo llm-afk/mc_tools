@@ -53,7 +53,7 @@ if errorlevel 1 (
 
 echo.
 echo [4/4] Installing factory-test Python dependencies...
-%PYTHON_CMD% -m pip install -e "%PROJECT_ROOT%[console,power,dynamometer,report]"
+%PYTHON_CMD% -m pip install -e "%PROJECT_ROOT%[console,power,dynamometer,report,upload]"
 if errorlevel 1 goto :failed
 
 echo.

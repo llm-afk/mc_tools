@@ -14,6 +14,7 @@ console = ["prompt-toolkit>=3.0.48,<4"]
 power = ["pyserial>=3.5,<4"]
 dynamometer = ["pyserial>=3.5,<4"]
 report = ["reportlab>=4,<5", "PyMuPDF>=1.24,<2"]
+upload = ["oss2>=2.19,<3", "requests>=2.32,<3"]
 
 [tool.setuptools]
 include-package-data = false
@@ -23,3 +24,4 @@ include = ["motor_platform*", "scripts*", "utils*"]
 
 [tool.setuptools.package-data]
 "scripts.factory_test" = ["assets/*.png"]
+"scripts.position_sweep" = ["native_engine.c"]

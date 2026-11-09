@@ -5,7 +5,8 @@ import threading
 import time
 from typing import Protocol
 
-from .protocol import CanFrame, MitCommand, control_frame, mit_frame, parse_state, validate_node
+from .protocol import (CanFrame, MitCommand, control_frame, feedback_request_frame,
+                       mit_frame, parse_state, validate_node)
 
 
 class CanTransport(Protocol):
@@ -244,6 +245,17 @@ class Motor:
 
     def send_mit(self, command: MitCommand):
         frame = mit_frame(self.node_id, command)
+        with self._bus._lock:
+            self._bus._check()
+            self._bus.transport.send(frame)
+
+    def request_feedback(self):
+        """Send a neutral RPDO5 request without enabling the motor (GD/ADM).
+
+        This sets all targets and gains to zero, and does not disable a motor
+        that was already enabled by another controller.
+        """
+        frame = feedback_request_frame(self.node_id)
         with self._bus._lock:
             self._bus._check()
             self._bus.transport.send(frame)

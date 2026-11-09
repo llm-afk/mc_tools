@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from motor_platform import MotorBus, MitCommand, CanFrame
-from motor_platform.runtime import ControlRuntime
+from motor_platform.runtime import ControlRuntime, RuntimeShutdownError
 from motor_platform.transports.canable import _Usb, Overlapped
 
 
@@ -35,8 +35,10 @@ class Transport:
                     self.enabled[node] = frame.data[4] == 1
                 self.rx.put(CanFrame(frame.can_id-0x80, b"\x60"+frame.data[1:4]+b"\0"*4))
         else:
-            node = frame.can_id-0x400
-            self.enabled[node] = True
+            enabling = frame.can_id >= 0x400
+            node = frame.can_id-(0x400 if enabling else 0x100)
+            if enabling:
+                self.enabled[node] = True
             self.rx.put(CanFrame(0x190+node, struct.pack("<fffhh",node,0,0,250,300)))
 
     def recv(self, timeout):
@@ -48,6 +50,41 @@ class Transport:
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_usb_receive_does_not_sleep_near_send_deadline(self):
+        usb = _Usb.__new__(_Usb)
+        usb._event = 1
+        usb._issue_read = lambda: None
+        usb.k = SimpleNamespace(WaitForSingleObject=lambda *args: 258)
+        for timeout, clock, expected_sleeps in (
+            (.001, [0, .0007, .0011], []),
+            (.01, [0, .001, .011], [.001]),
+        ):
+            with self.subTest(timeout=timeout), \
+                 patch('motor_platform.transports.canable.time.perf_counter', side_effect=clock), \
+                 patch('motor_platform.transports.canable.time.sleep') as sleep:
+                self.assertIsNone(usb._read_async(timeout))
+                self.assertEqual([call.args[0] for call in sleep.call_args_list], expected_sleeps)
+
+    def test_usb_write_timeout_cached_and_short_write_still_rejected(self):
+        usb = _Usb.__new__(_Usb)
+        usb.usb = 2
+        usb._write_timeouts = {}
+        policies = []
+        def policy(h, pipe, kind, size, value):
+            policies.append((pipe, value._obj.value))
+            return True
+        def write(h, pipe, buf, size, n, overlapped):
+            n._obj.value = size
+            return True
+        usb.w = SimpleNamespace(WinUsb_SetPipePolicy=policy, WinUsb_WritePipe=write)
+        for _ in range(10):
+            self.assertEqual(usb.transfer(2, b'abc'), b'abc')
+        usb.transfer(2, b'abc', timeout=.2)
+        self.assertEqual(policies, [(2, 100), (2, 200)])
+        usb.w.WinUsb_WritePipe = lambda *args: True
+        with self.assertRaisesRegex(OSError, 'short USB write'):
+            usb.transfer(2, b'abc', timeout=.2)
+
     def test_usb_poll_timeout_preserves_pending_read(self):
         usb=_Usb.__new__(_Usb)
         calls=[]
@@ -118,6 +155,81 @@ class RuntimeTests(unittest.TestCase):
             self.assertFalse(tr.sent)
         finally:rt.close()
 
+    def test_monitor_collects_feedback_without_enable_or_application_lease(self):
+        tr,bus,rt=self.make(lease=.025)
+        rt.start()
+        try:
+            one=rt.motor('J1')
+            one.set_rate(1000)
+            one.set_mit(MitCommand(torque=7,kp=20))  # An idle target cannot leak into monitoring.
+            one.monitor()
+            time.sleep(.08)
+            state=one.state(max_age=.5)
+            self.assertEqual((state.position,state.motor_temperature),(1,25))
+            stats=one.stats()
+            self.assertTrue(stats['monitoring'] and stats['periodic_active'])
+            self.assertFalse(stats['control_active'])
+            self.assertEqual(stats['target_hz'],1000)
+            self.assertIsNone(stats['fault'])
+            self.assertFalse(tr.enabled.get(1,False))
+            self.assertGreater(len(tr.sent),0)
+            self.assertTrue(all(f.can_id==0x101 and f.data==bytes(16) for f in tr.sent))
+            self.assertEqual(len(tr.owners),1)
+        finally:
+            rt.close()
+        self.assertIsNone(bus._io_owner)
+        self.assertTrue(all(f.can_id==0x101 for f in tr.sent))  # No enable/disable writes on a monitor-only connection.
+
+    def test_disable_resumes_neutral_monitoring_and_ignores_old_target(self):
+        tr,bus,rt=self.make()
+        rt.start()
+        try:
+            one=rt.motor('J1')
+            one.monitor()
+            one.enable()
+            one.set_mit(MitCommand(torque=3,kp=10))
+            time.sleep(.02)
+            one.disable()
+            start=len(tr.sent)
+            one.set_mit(MitCommand(torque=9))
+            time.sleep(.03)
+            frames=tr.sent[start:]
+            self.assertTrue(frames)
+            self.assertTrue(all(f.can_id==0x101 and f.data==bytes(16) for f in frames))
+            self.assertFalse(tr.enabled[1])
+            self.assertFalse(one.stats()['control_active'])
+            self.assertTrue(one.stats()['periodic_active'])
+        finally:
+            rt.close()
+
+    def test_monitor_schedule_uses_one_millisecond_period_without_catchup(self):
+        tr,bus,rt=self.make()
+        one=rt.motor('J1')
+        one._monitoring=True; one._rate_hz=1000; one._next=1
+        one._target=MitCommand(torque=99)
+        with patch('motor_platform.runtime.time.perf_counter',return_value=1):
+            rt._tick(1)
+        self.assertAlmostEqual(one._next,1.001)
+        with patch('motor_platform.runtime.time.perf_counter',return_value=1.0105):
+            rt._tick(1.0105)
+        self.assertEqual(len(tr.sent),2)
+        self.assertGreater(one._next,1.0105)
+        self.assertTrue(all(f.can_id==0x101 and f.data==bytes(16) for f in tr.sent))
+
+    def test_monitor_fault_releases_owner_without_unconfirmed_disable(self):
+        tr,bus,rt=self.make()
+        rt.start()
+        one=rt.motor('J1')
+        one.monitor()
+        tr.recv=lambda timeout: (_ for _ in ()).throw(OSError('unplugged'))
+        rt._thread.join(1)
+        self.assertFalse(rt._thread.is_alive())
+        with self.assertRaises(RuntimeShutdownError) as caught:
+            rt.close()
+        self.assertTrue(caught.exception.cleanup_confirmed)
+        self.assertIsNone(bus._io_owner)
+        self.assertFalse(any(f.can_id>=0x400 for f in tr.sent))
+
     def test_target_lease_expires(self):
         tr,bus,rt=self.make(lease=0.025)
         rt.start()
@@ -128,7 +240,12 @@ class RuntimeTests(unittest.TestCase):
             self.assertFalse(one.stats()["periodic_active"])
             self.assertIn("lease expired",one.stats()["fault"])
             self.assertTrue(any(f.can_id==0x601 and f.data[4]==2 for f in tr.sent))
-        finally:rt.close()
+        finally:
+            # Lease expiry sent a best-effort disable; its acknowledgement was
+            # not tracked, so closing must report the unconfirmed outcome.
+            with self.assertRaises(RuntimeShutdownError) as caught:
+                rt.close()
+            self.assertFalse(caught.exception.cleanup_confirmed)
 
     def test_atomic_validation_and_rate(self):
         tr,bus,rt=self.make()

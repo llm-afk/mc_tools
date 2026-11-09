@@ -6,11 +6,9 @@ Only inspect() is read-only. open() explicitly configures and starts CAN FD.
 import ctypes as C
 from collections import deque
 from ctypes import wintypes as W
-import json
 import math
 import os
 import struct
-import subprocess
 import time
 
 from ..core.can import CanFrame
@@ -73,6 +71,7 @@ class _Usb:
         self.usb = h()
         self._event = None
         self._pending = False
+        self._write_timeouts = {}
         try:
             _check(self.w.WinUsb_Initialize(self.handle, C.byref(self.usb)))
             pipes = []
@@ -112,21 +111,16 @@ class _Usb:
             raise ValueError("USB timeout must be finite and positive")
         if data is None:
             return self._read_async(timeout)
-        milliseconds = C.c_uint32(min(0xFFFFFFFF, max(1, math.ceil(timeout * 1000))))
-        _check(self.w.WinUsb_SetPipePolicy(self.usb, pipe, 3, 4, C.byref(milliseconds)))
-        incoming = data is None
-        size = self.read_size if incoming else len(data)
-        buf = C.create_string_buffer(size) if incoming else C.create_string_buffer(data, size)
+        milliseconds = min(0xFFFFFFFF, max(1, math.ceil(timeout * 1000)))
+        if self._write_timeouts.get(pipe) != milliseconds:
+            value = C.c_uint32(milliseconds)
+            _check(self.w.WinUsb_SetPipePolicy(self.usb, pipe, 3, 4, C.byref(value)))
+            self._write_timeouts[pipe] = milliseconds
+        size = len(data)
+        buf = C.create_string_buffer(data, size)
         n = C.c_uint32()
-        fn = self.w.WinUsb_ReadPipe if incoming else self.w.WinUsb_WritePipe
-        if not fn(self.usb, pipe, buf, size, C.byref(n), None):
-            error = C.get_last_error()
-            if incoming and error == 121:  # ERROR_SEM_TIMEOUT
-                if n.value:
-                    raise OSError("partial USB read timed out; reopen transport")
-                return None
-            raise C.WinError(error)
-        if not incoming and n.value != size:
+        _check(self.w.WinUsb_WritePipe(self.usb, pipe, buf, size, C.byref(n), None))
+        if n.value != size:
             raise OSError("short USB write; CAN transmission outcome uncertain")
         return buf.raw[:n.value]
 
@@ -148,7 +142,12 @@ class _Usb:
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
                 return None
-            time.sleep(min(remaining, 0.0001))
+            # A 100 us Python sleep measured ~0.54 ms on the target Windows
+            # host, and can overshoot the next TX deadline. Keep the final
+            # 600 us awake, polling the overlapped event (ctypes releases GIL).
+            # Longer waits still sleep, so idle/SDO waits do not busy-spin.
+            if remaining > 0.0006:
+                time.sleep(min(remaining - 0.0006, 0.001))
 
     def _issue_read(self):
         if not self._pending:
@@ -160,13 +159,17 @@ class _Usb:
                 raise C.WinError(C.get_last_error())
             self._pending = True
 
-    def close(self):
+    def suspend_read(self):
+        """Complete/cancel IN before an exclusive native owner takes this handle."""
         if self._pending:
             # Do not free OVERLAPPED/event/buffer until cancellation has completed.
             self.k.CancelIoEx(self.handle, C.byref(self._overlapped))
             n = C.c_uint32()
             self.w.WinUsb_GetOverlappedResult(self.usb, C.byref(self._overlapped), C.byref(n), True)
             self._pending = False
+
+    def close(self):
+        self.suspend_read()
         if self._event:
             self.k.CloseHandle(self._event)
             self._event = None
@@ -240,31 +243,17 @@ class Canable:
         仅枚举设备，不启动 CAN。上层使用 serial_number 配置目标适配器，
         不保存可能随插口变化的 path。命令行：python -m motor_platform --list。
         """
-        if os.name != "nt":
-            raise OSError("CANable WinUSB discovery requires Windows")
-        script = r'''
-$ErrorActionPreference = 'Stop'
-$items = @(Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -like 'USB\VID_1D50&PID_606F&MI_00\*' } | ForEach-Object {
-  $id = $_.InstanceId
-  $parent = (Get-PnpDeviceProperty -InstanceId $id -KeyName DEVPKEY_Device_Parent).Data
-  $guid = (Get-ItemProperty -LiteralPath ('HKLM:\SYSTEM\CurrentControlSet\Enum\' + $id + '\Device Parameters')).DeviceInterfaceGUIDs[0]
-  [pscustomobject]@{serial_number=$parent.Split('\')[-1]; path=('\\?\' + $id.Replace('\','#') + '#' + $guid)}
-})
-ConvertTo-Json -InputObject $items -Compress
-'''
-        result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-                                capture_output=True, text=True, timeout=30, creationflags=0x08000000)
-        if result.returncode:
-            raise OSError(f"USB discovery failed: {result.stderr.strip()}")
-        return json.loads(result.stdout)
+        from .usb_discovery import detect_canables
+        return detect_canables()
 
     def __init__(self, serial_number=None):
         """只保存连接参数，不打开 USB。
 
         上层应用应传入指定 SN；None 仅在恰好一只适配器时可用。
+        空字符串与 None 均表示自动选择唯一适配器。
         显式 SN 未匹配时直接报错，不回退到其他适配器。
         """
-        self.serial_number = serial_number
+        self.serial_number = None if serial_number == '' else serial_number
         self.counter_reports = 0
         self.last_counter_report = None
         self.protocol_reports = 0
@@ -281,7 +270,17 @@ ConvertTo-Json -InputObject $items -Compress
         devices = [d for d in available if self.serial_number is None or d["serial_number"] == self.serial_number]
         if len(devices) != 1:
             serials = ', '.join(d['serial_number'] for d in available) or '(none)'
-            raise OSError(f"matched {len(devices)} CANable devices; connected serials: {serials}; specify --serial when multiple adapters are connected")
+            error = OSError(f"matched {len(devices)} CANable devices; configured serial: {self.serial_number!r}; connected serials: {serials}")
+            if not available:
+                error.diagnostic_code = 'CAN_ADAPTER_NOT_FOUND'
+                error.diagnostic_hint = '未枚举到 CANable；检查 USB 连接和 WinUSB 驱动。'
+            elif self.serial_number is not None and not devices:
+                error.diagnostic_code = 'CAN_ADAPTER_SN_MISMATCH'
+                error.diagnostic_hint = '已保存的 CANable SN 与当前设备不匹配；在工位配置中重新选择已探测到的适配器。'
+            else:
+                error.diagnostic_code = 'CAN_ADAPTER_AMBIGUOUS'
+                error.diagnostic_hint = '存在多只匹配的 CANable；请在工位配置中明确指定适配器 SN。'
+            raise error
         return _Usb(devices[0]["path"])
 
     @staticmethod
@@ -316,11 +315,15 @@ ConvertTo-Json -InputObject $items -Compress
         self._usb = self._connect()
         try:
             self.info = self._info(self._usb)
-            if (self.info["channels"] != 1 or self.info["firmware"] not in {"0x260803", "0x260618"}
-                    or int(self.info["features"], 16) & 0x4500 != 0x4500):
-                raise OSError(f"unsupported CANable capabilities/firmware: {self.info}; supported firmware: 0x260803, 0x260618")
+            if self.info["channels"] != 1 or int(self.info["features"], 16) & 0x4500 != 0x4500:
+                raise OSError(f"unsupported CANable capabilities: {self.info}")
             nominal = bit_timing(self.info["clock_hz"], bitrate, sample_point, self.info["nominal_limits"])
             data = bit_timing(self.info["clock_hz"], data_bitrate, data_sample_point, self.info["data_limits"])
+            # Verify the required legacy status extension before any SET. A
+            # firmware date/version string alone is not a compatibility test.
+            feedback=self._usb.control(22,length=1)
+            if len(feedback)!=1:
+                raise OSError('CANable legacy GET_LAST_ERROR returned an invalid response')
             self._configured = True
             self._set(2, struct.pack("<II", 0, 0))
             self._set(0, struct.pack("<I", 0xBEEF))

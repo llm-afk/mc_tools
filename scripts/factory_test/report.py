@@ -245,6 +245,10 @@ def _render_pdf(path, summary):
     text(32,718,'电机 SN',8,muted); text(102,718,summary.get('motor_sn') or '未读取',11,font='Helvetica')
     text(350,718,'测试时间',8,muted)
     text(399,718,summary['started_at'][:19].replace('T',' '),8,font='Helvetica')
+    if summary.get('calibration'):
+        text(32,698,'工位：'+str(summary.get('fixture_id', ''))+
+             '    校准：'+('模拟完成' if summary.get('demo') else '完成')+
+             '    标签：'+('模拟打印' if summary.get('demo') else '打印已确认'),8,muted)
     for index, sec in enumerate(summary['sections']):
         top = 651-index*182
         line(32,top+10,563,top+10)
