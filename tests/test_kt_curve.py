@@ -6,8 +6,8 @@ from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import patch
 
-from scripts.kt_curve import app
-from scripts.kt_curve.recording import Recorder, COLUMNS, OUTPUT_COLUMNS
+from scripts.factory_test.measurements.kt_curve import app
+from scripts.factory_test.measurements.kt_curve.recording import Recorder, COLUMNS, OUTPUT_COLUMNS
 
 
 def state(at):
@@ -134,7 +134,6 @@ class ConsistencyTests(unittest.TestCase):
             rec.add('dyno', [state(.005)])
             result.update(recorder=rec, reason='completed')
         with tempfile.TemporaryDirectory() as directory, \
-             patch.object(app, '__file__', str(Path(directory)/'app.py')), \
              patch.object(app, 'detect_dynamometers', return_value=['fake']), \
              patch.object(app, 'resolve_power_port', return_value='fake'), \
              patch.object(app, 'Dynamometer', return_value=dyno), \
@@ -144,7 +143,7 @@ class ConsistencyTests(unittest.TestCase):
              patch.object(app, 'run', side_effect=run), \
              patch.object(app.time, 'sleep', side_effect=lambda seconds: events.append(('wait', seconds))), \
              patch('sys.stdout', io.StringIO()):
-            app.main(['--serial', 'test-sn', '--torque', '30'])
+            app.main(['--serial', 'test-sn', '--torque', '30'], output_dir=Path(directory)/"result")
             files = [p for p in Path(directory).rglob('*') if p.is_file()]
             self.assertEqual(len(files), 1)
             with files[0].open() as source:

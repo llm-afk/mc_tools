@@ -3,8 +3,8 @@ import math
 from pathlib import Path
 import tempfile
 import unittest
-from scripts.tn_curve.smoothing import smooth, append_smoothed_columns, SMOOTH_COLUMNS
-from scripts.tn_curve.app import COLUMNS
+from scripts.factory_test.measurements.smoothing import smooth, append_smoothed_columns, SMOOTH_COLUMNS
+from scripts.factory_test.measurements.tn_curve.app import COLUMNS
 
 
 class SmoothingTests(unittest.TestCase):

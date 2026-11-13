@@ -1,6 +1,4 @@
 import csv
-from datetime import datetime
-import io
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace as NS
@@ -39,13 +37,6 @@ class SerialTests(unittest.TestCase):
 
 
 class FactoryTests(unittest.TestCase):
-    def test_output_directory_uses_date_time_and_motor_sn(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            now = datetime(2026, 9, 15, 19, 35, 43)
-            first = app.create_output_directory(tmp, 'C1SN/001', now)
-            second = app.create_output_directory(tmp, 'C1SN/001', now)
-            self.assertEqual(first.name, '20260915_193543_C1SN_001')
-            self.assertEqual(second.name, '20260915_193543_C1SN_001_2')
 
     def test_linearity_uses_recorded_target_and_full_scale(self):
         rows=[dict(time_ms=str(i), motor_torque='999',
@@ -60,13 +51,6 @@ class FactoryTests(unittest.TestCase):
         self.assertEqual(report.metric('error',deviation,hi=5)['status'],'FAIL')
         self.assertEqual(report.metric('error',5,hi=5)['status'],'PASS')
 
-    def test_console_lists_all_results(self):
-        sections=[dict(name=n,status=s,metrics=[],note='reason') for n,s in
-                  [('kt','PASS'),('tn','PASS')]]
-        output=io.StringIO()
-        app.print_results({'sections':sections,'status':'FAIL'},'data',output)
-        self.assertIn('1. 扭矩输出误差测试  PASS',output.getvalue())
-        self.assertIn('2. 电机特性曲线  完成',output.getvalue())
 
     def args(self): return NS(id=1,serial='adapter',torque=30)
 

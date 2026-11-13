@@ -6,7 +6,7 @@
 ## 安装与使用
 
 ```powershell
-python -m pip install -e ".[power]"
+python -m pip install -e .
 ```
 
 连接、读取和关闭不主动改变输出开关；脚本决定是否使能、是否在结束时切断电源。
@@ -85,27 +85,11 @@ with PowerSupply(port="COM26") as power:
 - 关闭串口前已核对最终状态。关闭串口不切断输出。
 
 以上验证身份、读数、电压/限流设定读回及输出开关；未验证带载限流、CC 转换、OVP/OCP 触发或长期稳定性。
-## 电源测试脚本与自动探测
+## 上位机中的自动探测
 
-```powershell
-python -m pip install -e ".[console,power]"
-python -m scripts.power_control
-# 只自动识别，不进入控制台、不改变输出：
-python -m scripts.power_control --scan
-# 多设备或跳过扫描时指定端口：
-python -m scripts.power_control --port COM26
-```
-
-实时看板与命令编辑同屏，命令为 `voltage 12`、`current 1`、`on`、`off`、`rate 5`、`status`、`quit`。
-启动保持当前输出，退出默认关闭输出；`--keep-output` 则保持退出时的输出状态。
-默认电压电流目标 15 Hz；完整状态约每秒刷新，命令操作后立即刷新。看板显示设定/开关/模式龄期，CSV 的 status_received_at 标记完整状态时间。实际速度以串口响应为准。
-CSV 放在 `scripts/power_control/data/`，每次运行独立文件。
-
-自动探测显式查询枚举串口的 `*IDN?`，只接受 UDP6721；没有找到或存在多台时报错并要求指定端口。
-组件可复用 `detect_power_supplies()`、`resolve_power_port()`；`PowerSupply(port=...)` 本身仍只打开指定端口。
-单端口驱动阻塞会中止自动探测，避免无限等待，之后可用明确端口连接。
-
-已实际运行 `--scan`，识别到 `COM26: Uni-Trend,UDP6721,AWP7225150007,V1.10`，没有改变输出。
+在工位配置中选择电源串口或 auto。自动识别查询串口的 *IDN?，匹配 UDP6721；
+测功机串口先被识别并排除。组件使用 detect_power_supplies() 和 resolve_power_port()，
+测试流程负责设置、输出与收尾。
 
 ## 查询频率复核
 

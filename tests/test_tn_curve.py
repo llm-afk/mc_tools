@@ -3,7 +3,7 @@ import io
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch, Mock
-from scripts.tn_curve import app
+from scripts.factory_test.measurements.tn_curve import app
 
 
 def state(t, v):

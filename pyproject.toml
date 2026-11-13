@@ -3,24 +3,26 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "motor-script-platform"
-version = "0.1.0"
-description = "MIT motor protocol and native Windows CANable CAN FD transport"
+name = "production-motor-test"
+version = "1.0.11"
+description = "Production motor testing workstation"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pyserial>=3.5,<4",
+    "reportlab>=4,<5",
+    "PyMuPDF>=1.24,<2",
+    "oss2>=2.19,<3",
+    "requests>=2.32,<3",
+]
 
 [project.optional-dependencies]
-console = ["prompt-toolkit>=3.0.48,<4"]
-power = ["pyserial>=3.5,<4"]
-dynamometer = ["pyserial>=3.5,<4"]
-report = ["reportlab>=4,<5", "PyMuPDF>=1.24,<2"]
+build = ["pyinstaller>=6,<7"]
 
 [tool.setuptools]
 include-package-data = false
 
 [tool.setuptools.packages.find]
-include = ["motor_platform*", "scripts*", "utils*"]
+include = ["motor_platform*", "scripts*"]
 
 [tool.setuptools.package-data]
 "scripts.factory_test" = ["assets/*.png"]
-"scripts.position_sweep" = ["native_engine.c"]

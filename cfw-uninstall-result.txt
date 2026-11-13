@@ -1,1 +1,0 @@
-SUCCESS: Clash for Windows removed. Configuration and Clash Verge preserved.

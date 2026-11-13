@@ -7,8 +7,8 @@ from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
 from motor_platform import MotorBus, MotorState
-from scripts.tn_curve.recording import CurveRecorder
-from scripts.tn_curve import app
+from scripts.factory_test.measurements.tn_curve.recording import CurveRecorder
+from scripts.factory_test.measurements.tn_curve import app
 
 
 def feedback(t, torque):
@@ -18,13 +18,12 @@ def feedback(t, torque):
 class RecordingTests(unittest.TestCase):
     def test_main_creates_only_one_csv(self):
         with tempfile.TemporaryDirectory() as folder, \
-             patch.object(app, '__file__', str(Path(folder)/'app.py')), \
              patch.object(app, 'detect_dynamometers', return_value=['COM_TEST']), \
              patch.object(app, 'resolve_power_port', return_value='COM_POWER'), \
              patch.object(app, 'Dynamometer'), patch.object(app, 'PowerSupply'), \
              patch.object(app, 'TerminalConsole'), patch.object(app, 'Bench'), \
              patch.object(app, 'run') as run, patch('builtins.print'):
-            app.main(['--id', '1', '--serial', 'test', '--torque', '12'])
+            app.main(['--id', '1', '--serial', 'test', '--torque', '12'], output_dir=Path(folder)/"result")
             self.assertEqual(run.call_args.kwargs['torque'], 12)
             files = [p for p in Path(folder).rglob('*') if p.is_file()]
             self.assertEqual([p.name for p in files], ['curve.csv'])

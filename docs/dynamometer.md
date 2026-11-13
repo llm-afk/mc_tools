@@ -4,7 +4,7 @@ USB 转 RS-485，**115200 baud、8N1、无流控**，通信模式 0 的 6 字节
 组件只接收，不发送轮询、模式切换或控制命令。串口必须接在自动收发方向控制的 USB-RS485 适配器上。
 
 ```powershell
-python -m pip install -e ".[dynamometer]"
+python -m pip install -e .
 ```
 
 ## 脚本接口
@@ -61,39 +61,6 @@ CRC 不是绝对的身份标识，偶然误匹配仍有可能；`discarded_bytes
 
 本次只完成旧实现迁移与离线测试，尚未用当前 8N1 配置进行实机验证。
 
-## 独立接收测试脚本
+## 上位机使用
 
-```powershell
-python -m pip install -e ".[console,dynamometer]"
-python -m scripts.dynamometer_test
-# 指定串口：
-python -m scripts.dynamometer_test --port COM22
-# 仅被动探测：
-python -m scripts.dynamometer_test --scan
-# 采集10秒，无全屏界面：
-python -m scripts.dynamometer_test --port COM22 --duration 10 --no-console
-```
-
-默认持续运行，115200 8N1；`status` 刷新提示，`quit` 或 Ctrl+C 退出。
-`--display-hz` 仅控制界面刷新频率，不控制设备上报速度。`--torque-scale`、`--speed-scale` 为缩放分母。
-没有候选或存在多个候选时要求指定端口；脚本不发送任何设备指令。
-
-CSV 写到 `scripts/dynamometer_test/data/`，逐帧保留原始量化值和重复值，包含本地记录序号、
-主机接收时间、扭矩、转速和功率。本地序号不是设备帧序号。退出时停止接收后取出最后一批缓存；
-缓存溢出丢弃数会显示在统计中，不能把它误认为无条件完整记录。
-
-## 2026-09-14 实机验证
-
-当前 USB-RS485 适配器枚举为 COM9。使用 115200、8N1 被动探测成功，设备连续上报
-`00 00 00 00 00 24`；CRC 有效，对应零扭矩和零转速。
-
-运行 `python -m scripts.dynamometer_test --port COM9 --duration 3 --no-console --display-hz 2`
-共记录 3002 帧，最终统计为 998.34 Hz、18017 接收字节、0 重同步丢弃字节、
-0 缓存溢出、无接收故障。18017 字节包含退出时解析器中不足一帧的 5 个待接收字节。
-
-首次自动探测失败的原因是串口层固定请求 4096 字节，Windows CH340 驱动等待较大的请求完成，
-超过了 0.3 秒探测窗口。现改为读取驱动当前已有字节；缓冲为空时只等待 1 字节。
-修改后 `python -m scripts.dynamometer_test --scan` 自动识别 COM9。
-
-本次确认当前 8N1 接收、CRC 流解析、自动探测和约 1 kHz 主动上报。设备处于静止零值，
-仍未验证扭矩/转速缩放、符号、动态跟踪或长期零丢帧。
+在工位配置中选择测功机串口或 auto，自动产测流程负责连接、采集和收尾。

@@ -32,6 +32,13 @@ class FakeTransport:
 
 
 class WireTests(unittest.TestCase):
+    def test_feedback_request_is_neutral_and_does_not_use_auto_enable_id(self):
+        transport=FakeTransport()
+        motor=MotorBus(transport).motor(7)
+        motor.request_feedback()
+        self.assertEqual(transport.sent,[CanFrame(0x107,bytes(16))])
+        self.assertIsNone(motor.enabled)
+
     def test_control_golden_bytes(self):
         self.assertEqual(control_frame(1, True).can_id, 0x601)
         self.assertEqual(control_frame(1, True).data.hex(), "2b02200001000000")
@@ -182,6 +189,39 @@ class UsbTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             bit_timing(160_000_000, 3_000_001, 64, data)
 
+    def test_empty_serial_selects_the_only_adapter_without_starting_can(self):
+        device = dict(serial_number='20603054533050082', path='test-only-usb-path')
+        for serial in (None, ''):
+            with self.subTest(serial=serial), patch.object(Canable, 'detect', return_value=[device]), \
+                 patch('motor_platform.transports.canable._Usb') as usb:
+                can = Canable(serial)
+                self.assertIsNone(can.serial_number)
+                self.assertIs(can._connect(), usb.return_value)
+                usb.assert_called_once_with(device['path'])
+                usb.return_value.control.assert_not_called()
+                usb.return_value.transfer.assert_not_called()
+
+    def test_saved_serial_mismatch_never_falls_back_or_opens_usb(self):
+        device = dict(serial_number='20603054533050082', path='test-only-usb-path')
+        with patch.object(Canable, 'detect', return_value=[device]), \
+             patch('motor_platform.transports.canable._Usb') as usb:
+            with self.assertRaises(OSError) as caught:
+                Canable('20923378374350012')._connect()
+            self.assertEqual(caught.exception.diagnostic_code, 'CAN_ADAPTER_SN_MISMATCH')
+            self.assertIn(device['serial_number'], str(caught.exception))
+            self.assertIn('20923378374350012', str(caught.exception))
+            usb.assert_not_called()
+
+    def test_automatic_selection_rejects_missing_and_multiple_adapters(self):
+        for devices, code in (([], 'CAN_ADAPTER_NOT_FOUND'),
+                              ([dict(serial_number=sn, path=sn) for sn in ('one','two')], 'CAN_ADAPTER_AMBIGUOUS')):
+            with self.subTest(code=code), patch.object(Canable, 'detect', return_value=devices), \
+                 patch('motor_platform.transports.canable._Usb') as usb:
+                with self.assertRaises(OSError) as caught:
+                    Canable('')._connect()
+                self.assertEqual(caught.exception.diagnostic_code, code)
+                usb.assert_not_called()
+
     def test_receive_split_and_coalesced_frames(self):
         class Usb:
             input = 0x81
@@ -222,7 +262,7 @@ class UsbTests(unittest.TestCase):
                 if self.fail and request == 10: raise OSError("simulated USB failure")
                 return b"\x02" if request == 22 else b""
             def close(self): self.closed = True
-        for firmware, fail in ((version, failure) for version in ("0x260618", "0x260803", "0x261001")
+        for firmware, fail in ((version, failure) for version in ("0x260618", "0x260803", "0x261001", "0xFFFFFF")
                                for failure in (False, True)):
             info["firmware"] = firmware
             usb, can = Usb(fail), Canable()
@@ -232,6 +272,7 @@ class UsbTests(unittest.TestCase):
                     self.assertIsNone(can._usb)
                 else:
                     self.assertIs(can.open(), can)
+                    self.assertEqual(usb.calls[0],(22,None))  # Read-only compatibility probe before CAN mode changes.
                     sets = [(r,d) for r,d in usb.calls if d is not None]
                     self.assertEqual([r for r,d in sets], [2,0,1,10,2])
                     self.assertEqual(sets[-1][1], struct.pack("<II", 1, 0x100))
@@ -247,7 +288,7 @@ class UsbTests(unittest.TestCase):
             def control(self, *args, **kwargs):
                 raise AssertionError("unsupported adapter must not be configured")
             def close(self): self.closed = True
-        for change in ({"firmware": "0xFFFFFF"}, {"channels": 2}, {"features": "0xE43B"}):
+        for change in ({"channels": 2}, {"features": "0xE43B"}):
             with self.subTest(change=change):
                 usb, can = Usb(), Canable()
                 with patch.object(can, "_connect", return_value=usb), \
@@ -256,6 +297,24 @@ class UsbTests(unittest.TestCase):
                         can.open()
                 self.assertTrue(usb.closed)
                 self.assertIsNone(can._usb)
+
+    def test_missing_legacy_status_extension_rejects_before_any_set(self):
+        info=dict(firmware='0xFFFFFF',channels=1,features='0xE53B',clock_hz=160_000_000,
+                  nominal_limits=(1,256,1,128,128,1,512,1),data_limits=(1,32,1,16,16,1,32,1))
+        class Usb:
+            def __init__(self,response):self.response=response;self.calls=[];self.closed=False
+            def control(self,request,*,length=0,data=None):
+                self.calls.append((request,data))
+                if isinstance(self.response,Exception):raise self.response
+                return self.response
+            def close(self):self.closed=True
+        for response in (b'',OSError('unsupported request')):
+            usb,can=Usb(response),Canable()
+            with patch.object(can,'_connect',return_value=usb),patch.object(can,'_info',return_value=info):
+                with self.assertRaises(OSError):can.open()
+            self.assertEqual(usb.calls,[(22,None)])
+            self.assertTrue(usb.closed)
+            self.assertIsNone(can._usb)
 
 
 if __name__ == "__main__":

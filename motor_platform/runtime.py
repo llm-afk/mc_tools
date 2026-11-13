@@ -34,6 +34,13 @@ class Stats:
     fault: str | None = None
 
 
+class RuntimeShutdownError(RuntimeError):
+    """The worker failed; distinguish its fault from unconfirmed cleanup."""
+    def __init__(self, error, *, cleanup_confirmed):
+        super().__init__(f'CAN runtime stopped with error: {error}')
+        self.cleanup_confirmed = cleanup_confirmed
+
+
 class MotorChannel:
     """One named motor instance. Targets are immutable and replaced atomically."""
     def __init__(self, runtime, name, motor, rate_hz):
@@ -43,6 +50,7 @@ class MotorChannel:
         self._target = MitCommand()
         self._source = self._on_sent = None
         self._active = False
+        self._monitoring = False
         self._expires = self._next = 0.0
         self._inflight = 0
         self._last_rx = 0.0
@@ -98,6 +106,15 @@ class MotorChannel:
     def disable(self, timeout=0.5):
         return self._runtime._call(self, False, positive(timeout))
 
+    def monitor(self):
+        """Opt into periodic neutral RPDO5 feedback, including while disabled.
+
+        Never sends the auto-enabling 0x400 RPDO until enable() is requested.
+        Nonzero targets are used only after enable(); disable() returns to
+        neutral monitoring. Close the runtime to stop monitoring.
+        """
+        return self._runtime._call(self, 'monitor', 0.1)
+
     def state(self, max_age=0.1):
         positive(max_age)
         with self._runtime._lock:
@@ -127,7 +144,8 @@ class MotorChannel:
             data['can_last_counter_report'] = getattr(self._runtime._bus.transport, 'last_counter_report', None)
             span = data["last_tx_at"] - data["first_tx_at"]
             data.update(node_id=self.node_id, name=self.name, target_hz=self._rate_hz,
-                        periodic_active=self._active,
+                        periodic_active=self._active or self._monitoring,
+                        control_active=self._active, monitoring=self._monitoring,
                         enabled=self._motor.enabled,
                         actual_tx_hz=(data["tx_count"]-1)/span if span > 0 else 0.0)
             return data
@@ -145,6 +163,7 @@ class ControlRuntime:
         self._ready = threading.Event()
         self._queue = queue.Queue(maxsize=32)
         self._error = None
+        self._cleanup_error = None
         self._max_poll_s = self._max_poll_overrun_s = 0.0
         self._touched = set()
         self._channels = {name: MotorChannel(self, name, m, self.rate_hz) for name, m in motors.items()}
@@ -184,6 +203,14 @@ class ControlRuntime:
         return future.result()
 
     def _control(self, channel, enabled, timeout):
+        if enabled == 'monitor':
+            with self._lock:
+                if not channel._monitoring and not channel._active:
+                    channel._next = channel._last_rx = time.perf_counter()
+                    channel._inflight = 0
+                    channel._gap_anchor = None
+                channel._monitoring = True
+            return
         with self._lock:
             channel._active = False
         self._touched.add(channel.node_id)
@@ -203,6 +230,11 @@ class ControlRuntime:
             else:
                 channel._motor.disable(timeout)
                 self._touched.discard(channel.node_id)
+                with self._lock:
+                    channel._target = MitCommand()
+                    channel._source = channel._on_sent = None
+                    channel._next = channel._last_rx = time.perf_counter()
+                    channel._inflight = 0
         except BaseException as exc:
             with self._lock: channel._stats.fault = repr(exc)
             channel._motor.disable(wait_ack=False)
@@ -211,8 +243,9 @@ class ControlRuntime:
     def _tick(self, now):
         for channel in self._channels.values():
             with self._lock:
-                if not channel._active: continue
-                if now >= channel._expires:
+                if not (channel._active or channel._monitoring): continue
+                controlling = channel._active
+                if controlling and now >= channel._expires:
                     channel._active = False
                     channel._stats.fault = "application command lease expired"
                     expired = True
@@ -226,7 +259,7 @@ class ControlRuntime:
                             raise TimeoutError(f"{channel.name}: feedback not keeping up for 100 ms")
                         continue
                     target, due, period = channel._target, channel._next, 1/channel._rate_hz
-                    source, on_sent = channel._source, channel._on_sent
+                    source, on_sent = (channel._source, channel._on_sent) if controlling else (None, None)
             if expired:
                 # Do not wait for an ACK while other motors have scheduled traffic.
                 channel._motor.disable(wait_ack=False)
@@ -237,7 +270,10 @@ class ControlRuntime:
                 if not isinstance(target, MitCommand):
                     raise TypeError("MIT source must return MitCommand")
             write_started = time.perf_counter()
-            channel._motor.send_mit(target)
+            if controlling:
+                channel._motor.send_mit(target)
+            else:
+                channel._motor.request_feedback()
             sent = time.perf_counter()
             if on_sent is not None:
                 on_sent(sent, target)
@@ -276,7 +312,8 @@ class ControlRuntime:
                     else: future.set_result(None)
                 self._tick(time.perf_counter())
                 with self._lock:
-                    deadlines = [min(c._next,c._expires) for c in self._channels.values() if c._active]
+                    deadlines = [min(c._next,c._expires) if c._active else c._next
+                                 for c in self._channels.values() if c._active or c._monitoring]
                 remaining = min(0.005, max(0.000001, min(deadlines)-time.perf_counter())) if deadlines else 0.005
                 poll_started = time.perf_counter()
                 state = self._bus.poll(remaining)
@@ -295,10 +332,12 @@ class ControlRuntime:
         finally:
             self._stop.set()
             for channel in self._channels.values():
-                with self._lock: channel._active = False
+                with self._lock: channel._active = channel._monitoring = False
                 if channel.node_id in self._touched:
                     try: channel._motor.disable(timeout=0.1)
                     except BaseException as exc:
+                        self._cleanup_error = exc
+                        self._error = self._error or exc
                         with self._lock: channel._stats.fault = f"disable unconfirmed: {exc!r}"
                         try: channel._motor.disable(wait_ack=False)
                         except BaseException as send_exc:
@@ -315,7 +354,7 @@ class ControlRuntime:
         self._stop.set()
         self._thread.join()
         if self._error is not None:
-            raise RuntimeError(f"CAN runtime stopped with error: {self._error}") from self._error
+            raise RuntimeShutdownError(self._error, cleanup_confirmed=self._cleanup_error is None) from self._error
 
     def __enter__(self):
         return self

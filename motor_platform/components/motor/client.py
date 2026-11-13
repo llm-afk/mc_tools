@@ -5,7 +5,8 @@ import threading
 import time
 from typing import Protocol
 
-from .protocol import CanFrame, MitCommand, control_frame, mit_frame, parse_state, validate_node
+from .protocol import (CanFrame, MitCommand, control_frame, feedback_request_frame,
+                       mit_frame, parse_state, validate_node)
 
 
 class CanTransport(Protocol):
@@ -16,6 +17,13 @@ class CanTransport(Protocol):
 
 class SdoError(RuntimeError):
     pass
+
+
+class CanBusError(OSError):
+    def __init__(self, frame):
+        self.can_id = frame.can_id
+        self.payload_hex = frame.data.hex()
+        super().__init__(f"CAN error frame: {self.can_id:#x} {self.payload_hex}")
 
 
 def _timeout(value):
@@ -56,7 +64,7 @@ class MotorBus:
 
     def _dispatch(self, frame):
         if frame.is_error:
-            raise OSError(f"CAN error frame: {frame.can_id:#x} {frame.data.hex()}")
+            raise CanBusError(frame)
         if frame.is_extended or frame.is_remote:
             return
         for motor in self._motors.values():
@@ -244,6 +252,17 @@ class Motor:
 
     def send_mit(self, command: MitCommand):
         frame = mit_frame(self.node_id, command)
+        with self._bus._lock:
+            self._bus._check()
+            self._bus.transport.send(frame)
+
+    def request_feedback(self):
+        """Send a neutral RPDO5 request without enabling the motor (GD/ADM).
+
+        This sets all targets and gains to zero, and does not disable a motor
+        that was already enabled by another controller.
+        """
+        frame = feedback_request_frame(self.node_id)
         with self._bus._lock:
             self._bus._check()
             self._bus.transport.send(frame)

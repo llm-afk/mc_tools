@@ -1,30 +1,36 @@
 """Explicit SCPI identification of serial ports; never changes power output."""
 import threading
+import time
 from .client import PowerSupply
 from .protocol import PowerSupplyError
 
 
-def detect_power_supplies(*, ports=None, baudrate=9600, timeout=0.3):
+def detect_power_supplies(*, ports=None, baudrate=9600, timeout=0.3, observations=None):
     if ports is None:
         from serial.tools.list_ports import comports
         ports = [item.device for item in comports()]
     matches = {}
     for port in dict.fromkeys(ports):
-        result = []
+        started = time.perf_counter()
+        result = {}
         def probe(port=port, result=result):
             try:
                 with PowerSupply(port=port, baudrate=baudrate, timeout=timeout) as power:
-                    result.append(power.identity)
-            except Exception:
-                pass  # Not a responding UDP6721, or the port is unavailable.
+                    result['identity'] = power.identity
+            except Exception as exc:
+                result.update(error_type=type(exc).__name__, error=str(exc))
         worker = threading.Thread(target=probe, daemon=True, name='power-port-probe')
         worker.start()
         worker.join(timeout=max(2.0, timeout + 1))
-        if worker.is_alive():
+        stalled = worker.is_alive()
+        if observations is not None:
+            observations.append(dict(port=port, baudrate=baudrate, elapsed_s=round(time.perf_counter()-started, 4),
+                                     **({'stalled': True} if stalled else result)))
+        if stalled:
             # The worker owns cleanup if a driver eventually returns from open.
             raise TimeoutError(f'port probe stalled on {port}; specify --port explicitly')
-        if result:
-            matches[port] = result[0]
+        if 'identity' in result:
+            matches[port] = result['identity']
     return matches
 
 

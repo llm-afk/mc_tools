@@ -1,0 +1,40 @@
+{
+  "httpPort": 9876,
+  "printer": {
+    "name": "Bar Code Printer T-4502 PRO",
+    "type": "windows",
+    "shareName": "TSC_TE244",
+    "network": {
+      "host": "192.168.1.100",
+      "port": 9100,
+      "timeout": 5000
+    },
+    "serial": {
+      "path": "COM3",
+      "baudRate": 9600,
+      "dataBits": 8,
+      "stopBits": 1,
+      "parity": "none"
+    }
+  },
+  "label": {
+    "width": 50,
+    "height": 15,
+    "gap": 3,
+    "density": 10,
+    "speed": 3,
+    "direction": 1,
+    "copies": 1,
+    "dpi": 203
+  },
+  "layout": {
+    "barcodeHeight": 8,
+    "marginLeft": 3,
+    "marginTop": 2
+  },
+  "printerDiscovery": {
+    "serialScan": true,
+    "networkScan": false,
+    "windowsPrinterScan": true
+  }
+}

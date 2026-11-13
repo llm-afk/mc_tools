@@ -57,17 +57,24 @@ class RuntimeSourceTests(unittest.TestCase):
         self.assertEqual(len(tr.sent), 3)
 
     def test_source_is_not_evaluated_when_inactive_expired_or_backpressured(self):
-        for mode in ('inactive', 'expired', 'backpressure'):
+        for mode in ('inactive', 'expired', 'backpressure', 'monitoring'):
             tr, rt, channel = self.prepare()
             channel._source = lambda now: self.fail('source should not run')
             if mode == 'inactive':
                 channel._active = False
             elif mode == 'expired':
                 channel._expires = .9
-            else:
+            elif mode == 'backpressure':
                 channel._inflight, channel._last_rx = 4, 1
+            else:
+                channel._active=False
+                channel._monitoring=True
+                channel._on_sent=lambda *args:self.fail('idle observer should not run')
             rt._tick(1)
             self.assertFalse(any(frame.can_id == 0x401 for frame in tr.sent))
+            if mode == 'monitoring':
+                self.assertEqual(len(tr.sent),1)
+                self.assertEqual((tr.sent[0].can_id,tr.sent[0].data),(0x101,bytes(16)))
 
     def test_source_exception_stops_worker_and_disables_motor(self):
         transport = Transport()

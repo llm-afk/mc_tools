@@ -29,7 +29,7 @@ def check_dependencies():
     try:
         import reportlab  # noqa: F401
     except ImportError as exc:
-        raise RuntimeError('请先安装报告依赖：python -m pip install -e ".[report]"') from exc
+        raise RuntimeError('请先安装报告依赖：python -m pip install -e .') from exc
     if _find_pdftoppm() is None:
         try:
             import fitz  # noqa: F401
@@ -94,7 +94,7 @@ def kt_target_curve(rows, summary):
     estimated = not any(r.get('motor_application_target_torque', '') != '' for r in rows)
     if 'time_ms' not in rows[0]:
         # 历史两路平铺文件先按真实时间一对一配对，不能用行号冒充同步。
-        from utils.csv_streams import independent_rows
+        from scripts.factory_test.measurements.csv_streams import independent_rows
         fields = [k for k in rows[0] if k not in ('motor_time_ms', 'dyno_time_ms')]
         events = []
         for row in rows:
@@ -245,6 +245,10 @@ def _render_pdf(path, summary):
     text(32,718,'电机 SN',8,muted); text(102,718,summary.get('motor_sn') or '未读取',11,font='Helvetica')
     text(350,718,'测试时间',8,muted)
     text(399,718,summary['started_at'][:19].replace('T',' '),8,font='Helvetica')
+    if summary.get('calibration'):
+        text(32,698,'工位：'+str(summary.get('fixture_id', ''))+
+             '    校准：'+('模拟完成' if summary.get('demo') else '完成')+
+             '    标签：'+('模拟打印' if summary.get('demo') else '打印已确认'),8,muted)
     for index, sec in enumerate(summary['sections']):
         top = 651-index*182
         line(32,top+10,563,top+10)

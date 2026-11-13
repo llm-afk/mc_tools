@@ -1,0 +1,22 @@
+{
+  "name": "tsc-print-service",
+  "version": "1.0.0",
+  "description": "TSC 打印机本地桥接服务 — 接收TSPL指令并通过串口或网络发送到TSC打印机",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^1.0.0",
+    "bwip-js": "^4.11.1",
+    "opentype.js": "^2.0.0",
+    "pngjs": "^7.0.0",
+    "serialport": "^12.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "",
+  "license": "ISC"
+}

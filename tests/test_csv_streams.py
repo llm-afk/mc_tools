@@ -2,12 +2,12 @@ import csv
 from pathlib import Path
 import tempfile
 import unittest
-from utils.csv_streams import independent_rows, pack_streams
+from scripts.factory_test.measurements.csv_streams import independent_rows, pack_streams
 
 
 class StreamColumnsTests(unittest.TestCase):
     def test_alignment_never_reuses_a_batched_frame(self):
-        from utils.csv_streams import independent_rows
+        from scripts.factory_test.measurements.csv_streams import independent_rows
         fields = ['time_ms', 'motor_torque', 'dyno_torque_nm']
         rows = [dict(time_ms=str(i), motor_torque=str(i), dyno_torque_nm='') for i in range(10)]
         rows += [dict(time_ms='5', motor_torque='', dyno_torque_nm=str(100+i)) for i in range(6)]

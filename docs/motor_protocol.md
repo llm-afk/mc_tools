@@ -8,7 +8,7 @@
 ## 安装与只读识别
 
 Python >= 3.11。协议层只用标准库；终端看板及其交互测试依赖 prompt-toolkit；当前 CANable 后端需要 Windows 的 WinUSB 驱动。
-在平台根目录运行，或用 `python -m pip install -e ".[console]"` 安装后从其他脚本导入。
+在平台根目录运行，或用 `python -m pip install -e .` 安装后从其他脚本导入。
 
 ```powershell
 python -m motor_platform --serial 20903498384550052

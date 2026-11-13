@@ -15,7 +15,7 @@ MotorBus / CANable WinUSB → CAN FD 总线 → 多个电机
 
 ## ID 与配置
 
-每个脚本创建 `Canable(CANABLE_SERIAL)`，传给 `Bench(transport=can, motor_ids=[1,2], rate_hz=1000)`。SN 仅属于应用配置及 USB 传输层；Bench 管理传入传输的打开与关闭，不选择适配器。使用 `python -m motor_platform --list` 查看已连接 SN。
+每个脚本创建 `Canable(CANABLE_SERIAL)`，传给 `Bench(transport=can, motor_ids=[1,2], rate_hz=1000)`。SN 仅属于应用配置及 USB 传输层；Bench 管理传入传输的打开与关闭，不选择适配器。已连接 SN 在上位机“工位配置 → 工位设备”的列表中查看。
 组件不加载统一关节配置。重复/非法 ID 会被拒绝，未列出的 ID 不创建实例。
 配置只作用于主机，不修改电机 EEPROM。实例 node_id 为只读属性。
 
@@ -73,8 +73,7 @@ with Bench(transport=Canable(CANABLE_SERIAL), motor_ids=[1]) as bench:
 
 应用仍需在 `command_timeout` 内重复调用 `set_mit_source()` 续租，后台执行生成器本身不会延长租约。
 `set_mit()` 会取消生成器，重新 `enable()` 也会将目标恢复为全零并取消生成器及回调。
-该观察接口只覆盖周期发送，不覆盖使能过程中的中性帧。`scripts/position_sweep/` 的非 USB 模拟路径使用此接口；
-其真实 CANable 扫频已使用独立原生执行模块，不依赖 Python 周期调度。
+该观察接口覆盖周期发送。上位机调试使用周期状态监视及实时目标更新。
 
 ## 可观察指标
 

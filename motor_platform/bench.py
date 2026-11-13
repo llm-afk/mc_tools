@@ -53,7 +53,7 @@ class Bench:
         return self._bus.poll(timeout)
 
     def start(self, rate_hz=None, command_timeout=None):
-        """Start one shared I/O worker. Motors remain inactive until explicitly enabled."""
+        """Start one shared I/O worker; opt into monitor() or explicit enable()."""
         from .runtime import ControlRuntime
         if self._bus is None:
             raise RuntimeError("open bench first")

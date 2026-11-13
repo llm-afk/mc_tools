@@ -54,6 +54,12 @@ def mit_frame(node_id: int, command: MitCommand) -> CanFrame:
     return CanFrame(0x400 + validate_node(node_id), command.pack())
 
 
+def feedback_request_frame(node_id: int) -> CanFrame:
+    # GD RPDO5 / ADM RPDO5 updates neutral targets and returns TPDO5, without
+    # the automatic enable performed by their 0x400 compatibility entry.
+    return CanFrame(0x100 + validate_node(node_id), MitCommand().pack())
+
+
 def control_frame(node_id: int, enabled: bool) -> CanFrame:
     if type(enabled) is not bool:
         raise ValueError("enabled must be bool")
