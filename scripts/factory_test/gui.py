@@ -954,6 +954,9 @@ class FactoryWindow:
             with self.lock:
                 config = replace(self.config)
                 revision, mode_generation = self.config_revision, self.mode_generation
+                if self.drivers_blocking():
+                    # Re-emit the current operator prompt when driver preparation ends.
+                    last_candidate = last_probe_key = None
                 if (self.closing or self.shutdown.is_set() or self.configuring
                         or not self.dependencies_ready or not config.automatic or self.page != 'production'
                         or self.production_pause.is_set() or self.control_page.active or self.drivers_blocking()):

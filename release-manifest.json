@@ -2,10 +2,10 @@
   "version": "1.0.15",
   "channel": "production",
   "project": "pmt",
-  "built_at": "2026-11-14T21:50:26.585222+08:00",
+  "built_at": "2026-11-14T21:56:05.526400+08:00",
   "executable": "电机产测软件.exe",
-  "sha256": "168345afae4309a63d5a32910e96f3bb3f981784813f5aa853f7f0a8772cc7f5",
-  "bytes": 54102515,
+  "sha256": "6671f56966d48c776b4e753f76b2e4160238833f30e39ff37a688dd88305a5f6",
+  "bytes": 54101012,
   "python": "3.11.7 (tags/v3.11.7:fa7a6f2, Dec  4 2023, 19:24:49) [MSC v.1937 64 bit (AMD64)]",
   "isolated_self_check": {
     "ok": true,
@@ -108,7 +108,7 @@
       "height": 2105
     },
     "hardware_or_network_used": false,
-    "elapsed_s": 4.543
+    "elapsed_s": 4.584
   },
   "regression": {
     "ok": true,
@@ -163,7 +163,7 @@
       "scripts/factory_test/firmware.py": "de1e7faf0a758fe7ae50f84b330183355868a34d006e5e4741c6275c1660a17b",
       "scripts/factory_test/firmware_library.py": "b95ed55b9866a7f9330898af692682454fd526db594b734d34ff8562e0c0236d",
       "scripts/factory_test/firmware_settings.py": "335ffca1eb08ffe82c668165d60975490f892e3a175e11538e69bd64077a5663",
-      "scripts/factory_test/gui.py": "ebb5187b0f9dc249bfdeebf74fe47654570ff41cd75c2cbba63da06a0beccfd7",
+      "scripts/factory_test/gui.py": "3e8f9764fe532d57fa2f1d5ced1c4bed8d55bed8d1ddb7c0ad91ca1e98be2c8d",
       "scripts/factory_test/help_view.py": "b48d0272b2e68fd16168a184cb55aba111d30dca4913039b8ef75428756e234c",
       "scripts/factory_test/integrations.py": "5b3c67ab215f0f41177b8c2a4426fd668b2fc9a4caec3fb7f6d4433aebd2b143",
       "scripts/factory_test/lifecycle.py": "579ee93af51d8a269e17fa31b808357a4b4849e4ca907415f4d9ade88ebdfdcc",
@@ -301,7 +301,7 @@
     "scripts/factory_test/firmware.py": "de1e7faf0a758fe7ae50f84b330183355868a34d006e5e4741c6275c1660a17b",
     "scripts/factory_test/firmware_library.py": "b95ed55b9866a7f9330898af692682454fd526db594b734d34ff8562e0c0236d",
     "scripts/factory_test/firmware_settings.py": "335ffca1eb08ffe82c668165d60975490f892e3a175e11538e69bd64077a5663",
-    "scripts/factory_test/gui.py": "ebb5187b0f9dc249bfdeebf74fe47654570ff41cd75c2cbba63da06a0beccfd7",
+    "scripts/factory_test/gui.py": "3e8f9764fe532d57fa2f1d5ced1c4bed8d55bed8d1ddb7c0ad91ca1e98be2c8d",
     "scripts/factory_test/help_view.py": "b48d0272b2e68fd16168a184cb55aba111d30dca4913039b8ef75428756e234c",
     "scripts/factory_test/integrations.py": "5b3c67ab215f0f41177b8c2a4426fd668b2fc9a4caec3fb7f6d4433aebd2b143",
     "scripts/factory_test/lifecycle.py": "579ee93af51d8a269e17fa31b808357a4b4849e4ca907415f4d9ade88ebdfdcc",
@@ -499,7 +499,7 @@
     "scripts/factory_test/firmware.py": "de1e7faf0a758fe7ae50f84b330183355868a34d006e5e4741c6275c1660a17b",
     "scripts/factory_test/firmware_library.py": "b95ed55b9866a7f9330898af692682454fd526db594b734d34ff8562e0c0236d",
     "scripts/factory_test/firmware_settings.py": "335ffca1eb08ffe82c668165d60975490f892e3a175e11538e69bd64077a5663",
-    "scripts/factory_test/gui.py": "ebb5187b0f9dc249bfdeebf74fe47654570ff41cd75c2cbba63da06a0beccfd7",
+    "scripts/factory_test/gui.py": "3e8f9764fe532d57fa2f1d5ced1c4bed8d55bed8d1ddb7c0ad91ca1e98be2c8d",
     "scripts/factory_test/help_view.py": "b48d0272b2e68fd16168a184cb55aba111d30dca4913039b8ef75428756e234c",
     "scripts/factory_test/integrations.py": "5b3c67ab215f0f41177b8c2a4426fd668b2fc9a4caec3fb7f6d4433aebd2b143",
     "scripts/factory_test/lifecycle.py": "579ee93af51d8a269e17fa31b808357a4b4849e4ca907415f4d9ade88ebdfdcc",
@@ -874,6 +874,6 @@
     "tests/test_tn_recording.py": "ba96b8d0e52facc5653b624d19ce9119b13828e7cfab4eeec62133ad90356587",
     "tests/test_tn_smoothing.py": "516aa7e205da604cfb92dc6c390bcc458832a9bfc9541b4d85125f10cd807170",
     "tests/test_usb_discovery.py": "06bcb5cb6705b76fb0f2a825d4cf26a68085064af18c15e23da981db0941d5f2",
-    "电机产测软件.exe": "168345afae4309a63d5a32910e96f3bb3f981784813f5aa853f7f0a8772cc7f5"
+    "电机产测软件.exe": "6671f56966d48c776b4e753f76b2e4160238833f30e39ff37a688dd88305a5f6"
   }
 }
