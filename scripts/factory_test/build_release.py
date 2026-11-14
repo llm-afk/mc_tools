@@ -35,6 +35,8 @@ def source_files():
                 continue
             if path.is_file() and path.suffix in ('.py', '.spec', '.md', '.png'):
                 yield path
+    for name in ('setup_devices.ps1', 'packages.json', 'tsc_printer/README.md'):
+        yield ROOT/'drivers'/name
     for path in sorted(PRINTER_SERVICE.iterdir()):
         if path.is_file() and path.suffix in ('.js', '.json', '.ps1', '.cmd', '.md', '.txt'):
             yield path
@@ -44,7 +46,8 @@ def managed_files():
     paths = set(source_files())
     for folder in (ROOT/'drivers', PRINTER_SERVICE):
         paths.update(path for path in folder.rglob('*')
-                     if path.is_file() and '__pycache__' not in path.parts)
+                     if path.is_file() and '__pycache__' not in path.parts
+                     and path != ROOT/'drivers/tsc_printer/Generic_12.4.0.exe')
     return sorted(paths)
 
 
@@ -86,6 +89,8 @@ def build_in(work):
     for name in ('node.exe', 'node_modules', 'LICENSE-node.txt'):
         if not (PRINTER_SERVICE/name).exists():
             raise FileNotFoundError('缺少打印运行环境：'+str(PRINTER_SERVICE/name))
+    from .driver_setup import optional_printer_package
+    driver_package = optional_printer_package(ROOT)
     initial_firmware = firmware_record(ROOT)
     initial = {p.relative_to(ROOT).as_posix(): digest(p) for p in source_files()}
     initial_files = {p.relative_to(ROOT).as_posix(): digest(p) for p in managed_files()}
@@ -156,6 +161,7 @@ def build_in(work):
         python=sys.version, isolated_self_check=check, regression=regression, source_files=initial,
         printer_renderer_check=renderer_check, printer_tests=printer_tests,
         printer_raw_helper_compile_check=raw_check, firmware_app=firmware_app,
+        printer_driver_package=driver_package,
         files=dict(current_files, **{executable.name:digest(executable)}),
     )
     publish_executable(executable)

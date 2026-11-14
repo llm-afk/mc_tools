@@ -6,7 +6,7 @@ from pathlib import Path
 from .version import VERSION
 
 REQUIRED_CHECKS = (
-    'ok', 'frozen', 'version_display', 'debug_monitor_on_connect', 'debug_settings_accessible',
+    'ok', 'frozen', 'version_display', 'driver_setup_guarded', 'debug_monitor_on_connect', 'debug_settings_accessible',
     'adapter_single_auto_connect', 'mode_handoff_async', 'debug_auto_connect', 'gui_event_processing_bounded',
     'waveform_retained', 'waveform_time_axis_stable', 'waveform_target_solid', 'slider_wheel',
     'hardware_revision_entries', 'revision_whitelist_removed', 'debug_enable_without_sn_whitelist',
@@ -22,7 +22,9 @@ REQUIRED_CHECKS = (
 def verify(release):
     from .build_release import ROOT, digest, source_files, firmware_record
 
+    from .driver_setup import optional_printer_package
     release = Path(release).resolve()
+    driver_package = optional_printer_package(release)
     manifest = json.loads((release/'release-manifest.json').read_bytes())
     assert manifest['version'] == VERSION and manifest['channel'] == 'production'
     check = manifest['isolated_self_check']
@@ -43,7 +45,7 @@ def verify(release):
     current_app = firmware_record(release)
     return dict(ok=True, version=VERSION, executable=str(release/'电机产测软件.exe'),
                 files=len(manifest['files']), source_files=len(sources), guarded_tests=proof['guarded_tests'],
-                printer_tests=manifest['printer_tests']['tests'],
+                printer_tests=manifest['printer_tests']['tests'], printer_driver=driver_package,
                 source_matches_release=True, hardware_or_network_used=False,
                 firmware_version=current_app['version'], firmware_file=current_app['file'],
                 firmware_matches_build=current_app == manifest['firmware_app'])

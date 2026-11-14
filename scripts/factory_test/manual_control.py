@@ -511,6 +511,7 @@ class ControlPage:
     def tick(self):
         if (not self.want_connection or self.active or self.host.page != 'control'
                 or getattr(self.host,'settings_save_pending',False)
+                or self.host.drivers_blocking()
                 or self.host.pending_page is not None or not self.host.dependencies_ready
                 or self.host.shutdown.is_set() or self.host.busy or self.host.scan_in_progress or self.host.handoff_error):
             return
@@ -527,6 +528,9 @@ class ControlPage:
 
     def connect(self, *, automatic=False):
         if self.host.shutdown.is_set():
+            return
+        if self.host.drivers_blocking():
+            self.message.set('正在准备设备驱动，完成后自动连接。')
             return
         if self.active or self.host.busy or getattr(self.host,'settings_save_pending',False):
             self.message.set('设备正在使用中，请先停止并断开现有任务')

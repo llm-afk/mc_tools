@@ -341,7 +341,7 @@ def run(destination):
                 'motor_platform.Canable.detect', 'motor_platform.Canable.open',
                 'motor_platform.transports.canable._Usb', 'serial.Serial',
                 'urllib.request.OpenerDirector.open', 'requests.sessions.Session.request', 'socket.socket.connect',
-                'scripts.factory_test.printer_service.spawn_process', 'scripts.factory_test.network_status.spawn_snapshot')]
+                'scripts.factory_test.printer_service.spawn_process', 'scripts.factory_test.network_status.spawn_snapshot', 'scripts.factory_test.driver_setup.spawn_driver_process')]
             check_debug_monitor()
             stack.enter_context(patch.object(FactoryWindow, 'bootstrap_dependencies'))
             stack.enter_context(patch('scripts.factory_test.operator_view.port_options', return_value=['auto', 'COM3']))
@@ -768,6 +768,24 @@ def run(destination):
                 window.process_events()
                 assert not window.ready_to_start
                 health.assert_not_called()
+            from types import SimpleNamespace
+            import threading
+            permission = threading.Event()
+            window.driver_manager = SimpleNamespace(request='offline-driver', permission=permission)
+            window.busy = window.scan_in_progress = False
+            window.pending_page = None
+            window.settings_save_pending = window.configuring = False
+            window.driver_event(dict(state='NEEDED', request_id='offline-driver',
+                revision=window.config_revision, message='离线验证驱动交接'))
+            window.busy = True
+            window.advance_driver_install()
+            assert not permission.is_set()
+            window.busy = False
+            window.advance_driver_install()
+            assert permission.is_set() and window.driver_installing and not window.ready_to_start
+            window.driver_event(dict(state='DONE', request_id='offline-driver', message='离线驱动交接检查完成'))
+            assert not window.drivers_blocking()
+            window.driver_manager = None
             window.control_page.session=None
             window.delivery=None
             window.retiring_deliveries=[]
@@ -784,7 +802,7 @@ def run(destination):
             root = None
             for guard in io_guards:
                 guard.assert_not_called()
-            result.update(ok=True, dependencies=dependencies, menu=menu, white_theme=True,
+            result.update(ok=True, dependencies=dependencies, menu=menu, white_theme=True, driver_setup_guarded=True,
                           startup_log_visible=True,network_state_local_only=True,log_scroll_preserved=True,
                           production_log_heights_px=layout_heights,production_layout_stable=True,operator_action_prompts=True,
                           operator_manual=True,operator_manual_chapters=len(window.help_view.chapters),

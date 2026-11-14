@@ -9,3 +9,6 @@ build/
 # Production configuration, secrets, logs and reports are stored in the user profile.
 
 # The production EXE, release manifest and offline printer runtime are tracked.
+
+# Original printer installer for internal offline delivery.
+/drivers/tsc_printer/Generic_12.4.0.exe

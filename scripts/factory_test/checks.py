@@ -30,7 +30,7 @@ def run():
             'motor_platform.Canable.detect', 'motor_platform.transports.canable._Usb.__init__',
             'motor_platform.transports.canable._Usb', 'serial.Serial',
             'urllib.request.OpenerDirector.open', 'requests.sessions.Session.request', 'socket.socket.connect',
-            'scripts.factory_test.printer_service.spawn_process', 'scripts.factory_test.network_status.spawn_snapshot',
+            'scripts.factory_test.printer_service.spawn_process', 'scripts.factory_test.network_status.spawn_snapshot', 'scripts.factory_test.driver_setup.spawn_driver_process',
         )
         count = 0
         for group, blocked in (

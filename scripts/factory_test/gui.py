@@ -93,6 +93,11 @@ class FactoryWindow:
         self.network_monitor = None
         self.network_snapshot = None
         self.bootstrap_thread = None
+        self.driver_manager = None
+        self.driver_request = None
+        self.driver_pending = self.driver_installing = False
+        self.driver_preferred = None
+        self.driver_snapshot = None
         self.status_messages = {}
         self.config_existed = False
         self.events = queue.Queue()
@@ -187,6 +192,109 @@ class FactoryWindow:
         root.after(100, self.poll)
         self.bootstrap_dependencies()
 
+    def drivers_blocking(self):
+        return bool(getattr(self, 'driver_pending', False) or getattr(self, 'driver_installing', False))
+
+    def configure_driver_manager(self):
+        if self.config.simulation or os.name != 'nt' or self.driver_manager is not None:
+            return
+        from .driver_setup import DriverManager
+        def snapshot():
+            with self.lock:
+                return replace(self.config), self.config_revision
+        self.write_log('[驱动] 开始核对已连接设备的驱动、USB 打印端口和打印队列。')
+        self.driver_manager = DriverManager(self.storage_root or state_root(), snapshot,
+            lambda value: self.events.put(('driver_setup', value)), diagnostics=self.diagnostics)
+        self.driver_manager.start()
+
+    def driver_event(self, value):
+        state = value['state']
+        if state == 'INVENTORY':
+            self.driver_snapshot = value['inventory']
+            self.write_log('[驱动] '+value['message'], persist=False)
+            for issue in value['inventory'].get('issues', []):
+                self.write_log('[驱动] '+issue, level='WARNING', persist=False)
+            preferred = value['inventory'].get('preferred_printer')
+            if preferred and value['revision'] == self.config_revision:
+                self.driver_preferred = (preferred, value['revision'])
+        elif state == 'NEEDED':
+            if value['revision'] != self.config_revision:
+                return
+            with self.lock:
+                self.driver_request = value
+                self.driver_pending = True
+                self.start_requested = self.ready_to_start = False
+            if not self.busy:
+                self.stop.config(state='disabled')
+            self.write_log('[驱动] '+value['message'], persist=False)
+            if not self.busy and self.page == 'production':
+                self.show_idle_prompt()
+        elif state == 'STAGE':
+            event = value['event']
+            self.write_log('[驱动] '+event['message'], persist=False,
+                level='ERROR' if event['stage']=='failed' else 'INFO')
+        elif state in ('DONE', 'FAILED', 'CANCELLED'):
+            request = getattr(self, 'driver_request', None)
+            if request and value.get('request_id') == request['request_id']:
+                with self.lock:
+                    self.driver_pending = self.driver_installing = False
+                    self.driver_request = None
+                self.invalidate_readiness()
+            if value.get('message'):
+                message = value['message']
+                if state == 'FAILED':
+                    message += '；请联系工程人员查看日志或运行根目录 install_drivers.cmd。'
+                if value.get('reboot_required'):
+                    message += '；Windows 要求重启，请由现场负责人安排。'
+                self.write_log('[驱动] '+message, persist=False, level='ERROR' if state=='FAILED' else 'INFO')
+            self.last_health = 0.0
+
+    def advance_driver_install(self):
+        manager = getattr(self, 'driver_manager', None)
+        if manager is None:
+            return
+        with self.lock:
+            idle = not (self.closing or self.busy or self.scan_in_progress or self.control_page.active
+                        or self.configuring or self.pending_page is not None or self.settings_save_pending)
+            request = getattr(self, 'driver_request', None)
+            if not idle or getattr(self, 'driver_installing', False):
+                return
+            if request:
+                if request['revision'] != self.config_revision or manager.request != request['request_id']:
+                    return
+                self.driver_installing = True
+                self.driver_pending = False
+                self.start_requested = self.ready_to_start = False
+                manager.permission.set()
+                self.stop.config(state='disabled')
+                if self.page == 'production':
+                    self.show_idle_prompt()
+                return
+            preferred = getattr(self, 'driver_preferred', None)
+            self.driver_preferred = None
+            if not preferred or preferred[1] != self.config_revision:
+                return
+            from .station_config import DEFAULT_PRINTER_NAME
+            if self.config.printer_name not in ('', DEFAULT_PRINTER_NAME):
+                return
+            config = replace(self.config, printer_name=preferred[0])
+            self.configuring = True
+        try:
+            save_config(config, self.config_path)
+            with self.lock:
+                self.config = config
+                self.config_revision += 1
+            self.vars['printer_name'].set(config.printer_name)
+            self.configure_printer_service()
+            self.write_log('[驱动] 已采用与标签打印机型号和 USB 端口匹配的现有队列：'+config.printer_name)
+            self.invalidate_readiness()
+        except Exception as exc:
+            self.diagnostics.station.event('driver.queue_selection.failed', level='ERROR', error=exc)
+            self.write_log('[驱动] 保存打印队列选择失败：'+str(exc), level='ERROR')
+        finally:
+            with self.lock:
+                self.configuring = False
+
     def configure_printer_service(self):
         if self.closing: return
         from .printer_service import LocalPrinterService
@@ -241,6 +349,9 @@ class FactoryWindow:
 
     def show_settings(self):
         if self.closing:
+            return
+        if getattr(self, 'driver_installing', False):
+            self.hint.set('正在安装设备驱动，完成后可修改工位设置。')
             return
         if self.busy:
             self.hint.set('任务运行中，结束后可修改工位设置。')
@@ -448,7 +559,7 @@ class FactoryWindow:
         if self.busy:
             self.request_stop()
             return
-        if self.page != 'production' or self.control_page.active or not self.ready_to_start:
+        if self.drivers_blocking() or self.page != 'production' or self.control_page.active or not self.ready_to_start:
             return
         WindowConsole.cancelled.clear()
         with self.lock:
@@ -507,13 +618,13 @@ class FactoryWindow:
 
     def production_event_current(self, value):
         return (not self.closing and not self.configuring and self.page == 'production'
-            and self.pending_page is None
+            and self.pending_page is None and (self.busy or not self.drivers_blocking())
             and value.get('config_revision',self.config_revision) == self.config_revision
             and value.get('mode_generation',self.mode_generation) == self.mode_generation)
 
     def apply_config(self, *, commit_services=False):
         with self.lock:
-            if self.closing or self.configuring or self.busy or self.control_page.active:
+            if self.closing or self.configuring or self.busy or self.control_page.active or getattr(self, 'driver_installing', False):
                 if self.control_page.active:
                     self.settings_error.set('调试连接中；修改将在“保存并关闭”后生效。')
                 return False
@@ -738,6 +849,9 @@ class FactoryWindow:
         if getattr(self,'network_snapshot',None) is not None:
             from .network_status import network_messages
             text += '\n\n本机网络状态（最近一次检查）：\n'+'\n'.join(message for _,message in network_messages(self.network_snapshot))
+        if getattr(self,'driver_snapshot',None) is not None:
+            text += '\n\n本机驱动检查（最近一次快照）：\n'+json.dumps(self.driver_snapshot,ensure_ascii=False,indent=2)
+        text += '\n驱动准备：'+('安装中' if getattr(self,'driver_installing',False) else '等待工位空闲' if getattr(self,'driver_pending',False) else '空闲')
         text += '\n当前日志：'+str(self.diagnostics.current.path)
         if self.config_error or self.handoff_error:
             text += '\n当前异常：'+(self.config_error or self.handoff_error)
@@ -842,7 +956,7 @@ class FactoryWindow:
                 revision, mode_generation = self.config_revision, self.mode_generation
                 if (self.closing or self.shutdown.is_set() or self.configuring
                         or not self.dependencies_ready or not config.automatic or self.page != 'production'
-                        or self.production_pause.is_set() or self.control_page.active):
+                        or self.production_pause.is_set() or self.control_page.active or self.drivers_blocking()):
                     continue
                 self.scan_in_progress = True
                 start_before_probe = self.start_requested
@@ -1088,6 +1202,8 @@ class FactoryWindow:
     def show_idle_prompt(self, candidate=None):
         if self.terminal_prompt:
             self.set_prompt(*self.terminal_prompt)
+        elif self.drivers_blocking():
+            self.set_prompt('正在准备设备驱动，请稍候','如 Windows 提示管理员授权，请联系现场负责人允许安装。')
         elif self.config_error:
             self.set_prompt('请联系工程人员检查工位配置',self.config_error,'#C13F50')
         elif not self.config.automatic:
@@ -1185,7 +1301,9 @@ class FactoryWindow:
                 continue
             if kind in ('device_health','motor_probe','candidate','removed','serial_inventory') and not self.production_event_current(value):
                 continue
-            if kind=='network_status':
+            if kind=='driver_setup':
+                self.driver_event(value)
+            elif kind=='network_status':
                 from .network_status import network_messages
                 self.network_snapshot=value
                 for level,message in network_messages(value):
@@ -1211,6 +1329,7 @@ class FactoryWindow:
                     self.write_log('缺少依赖：'+', '.join(value))
                 else:
                     self.dependencies_ready=True
+                    self.configure_driver_manager()
                     self.configure_printer_service()
                     self.configure_delivery()
                     self.show_idle_prompt()
@@ -1406,6 +1525,7 @@ class FactoryWindow:
                 else: self.write_log(value,persist=kind=='log')
         self.advance_page_transition()
         self.advance_settings_save()
+        self.advance_driver_install()
         self.select_single_adapter()
         self.control_page.tick()
         self.retiring_deliveries = [item for item in self.retiring_deliveries
@@ -1504,6 +1624,8 @@ class FactoryWindow:
             debug_active=self.control_page.active,scan_in_progress=self.scan_in_progress,
             station_worker_alive=bool(self.worker and self.worker.is_alive()))
         self.control_page.leave()
+        if getattr(self, 'driver_manager', None) is not None:
+            self.driver_manager.stop()
         for delivery in [*self.retiring_deliveries,self.delivery]:
             if delivery is not None:
                 delivery.stop()
@@ -1522,6 +1644,7 @@ class FactoryWindow:
         candidates.append(self.printer_check_thread)
         candidates.append(getattr(self,'export_thread',None))
         candidates.append(getattr(self,'bootstrap_thread',None))
+        candidates.append(getattr(getattr(self,'driver_manager',None),'thread',None))
         candidates.append(getattr(getattr(self,'network_monitor',None),'thread',None))
         candidates.append(getattr(getattr(self,'firmware_panel',None),'thread',None))
         health = getattr(self,'device_health',None)
@@ -1536,6 +1659,7 @@ class FactoryWindow:
         if self.busy or self.scan_in_progress or self.control_page.active or pending:
             message = ('正在停止电机并释放设备连接…' if self.busy or self.scan_in_progress or self.control_page.active
                        else '正在结束本机打印服务，完成后自动关闭…' if any(name.startswith('printer-service') for name in pending)
+                       else '正在等待设备驱动准备结束，完成后自动关闭…' if 'device-driver-setup' in pending
                        else '正在结束本机网络检查，完成后自动关闭…' if 'network-status' in pending
                        else '正在保存诊断包，完成后自动关闭…' if 'diagnostic-export' in pending
                        else '正在等待当前报告请求结束并保存状态，完成后自动关闭…')

@@ -251,7 +251,7 @@ class ManualTests(unittest.TestCase):
         from scripts.factory_test.manual_control import ControlPage
         page = ControlPage.__new__(ControlPage)
         page.session = None
-        page.host = NS(busy=False, config=StationConfig())
+        page.host = NS(busy=False, config=StationConfig(), drivers_blocking=lambda:False)
         page.host.shutdown=threading.Event()
         page.message = Mock()
         with patch('scripts.factory_test.manual_control.ManualSession') as session:

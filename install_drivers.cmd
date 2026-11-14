@@ -1,16 +1,10 @@
 @echo off
 setlocal
-fltmc >nul 2>nul
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0drivers\setup_devices.ps1" -Mode Install
 if errorlevel 1 (
-  echo Run this file as administrator to install USB drivers.
+  echo Driver preparation was not confirmed. See the workstation log or %%LOCALAPPDATA%%\MirrorMe\FactoryStation\driver-setup.
   pause
   exit /b 1
 )
-pnputil.exe /add-driver "%~dp0drivers\*.inf" /subdirs /install
-if errorlevel 1 (
-  echo Windows reported a driver installation error.
-  pause
-  exit /b 1
-)
-echo Driver processing finished. Reconnect USB devices and open the application.
+echo Connected device drivers have been checked. No print job was submitted.
 pause

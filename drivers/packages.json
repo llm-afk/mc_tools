@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "printer": {
+    "model": "Bar Code Printer T-4502 PRO",
+    "version": "12.4.0.0",
+    "filename": "Generic_12.4.0.exe",
+    "bundled": "tsc_printer/Generic_12.4.0.exe",
+    "sha256": "693065d13f228fd640b9467321e622a24808a1c853b66efaf7c2feed7ddded85",
+    "archive_sha256": "f756961bd64e4d8121edcfc2278b314ce13bcfc3c9491830a999d71a5ed8b44f",
+    "url": "https://fs.chinatsc.cn/system/files/generic_12.4.0.exe.zip",
+    "source": "https://www.chinatsc.cn/zh-CN/products/t-4502-series-4-inch-desktop-printers",
+    "usb_id": "USB\\VID_1203&PID_0274"
+  },
+  "usb": [
+    {
+      "name": "CANable WinUSB",
+      "inf": "canable_winusb/canable2_gs_usb_(interface_0).inf",
+      "hardware_ids": [
+        "USB\\VID_1D50&PID_606F&MI_00"
+      ],
+      "service": "WinUSB",
+      "device_class": "USBDevice"
+    },
+    {
+      "name": "WCH CH343",
+      "inf": "wch_ch343/ch343ser.inf",
+      "device_class": "Ports"
+    },
+    {
+      "name": "WCH CH340",
+      "inf": "wch_ch340/ch341ser.inf",
+      "device_class": "Ports"
+    }
+  ]
+}
