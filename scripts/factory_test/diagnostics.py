@@ -86,7 +86,7 @@ def error_details(error):
             code, hint = 'DNS_ERROR', '检查服务域名、DNS 和网络配置。'
         elif types & {'ConnectionRefusedError'} or errno.ECONNREFUSED in errnos or 10061 in windows_codes:
             code, hint = 'CONNECTION_REFUSED', '目标端口拒绝连接；检查服务进程是否启动及地址、端口是否正确。'
-        elif types & {'TimeoutError', 'Timeout', 'ReadTimeout', 'ConnectTimeout'} or errno.ETIMEDOUT in errnos or 10060 in windows_codes:
+        elif types & {'TimeoutError', 'SdoReplyTimeout', 'MotorAbsent', 'Timeout', 'ReadTimeout', 'ConnectTimeout'} or errno.ETIMEDOUT in errnos or 10060 in windows_codes:
             code, hint = 'TIMEOUT', '在期限内未收到确认；检查链路和设备/服务日志。超时本身不能证明命令未执行。'
         elif isinstance(error, PermissionError) or errno.EACCES in errnos or any(n in windows_codes for n in (5, 32)):
             code, hint = 'ACCESS_DENIED_OR_BUSY', '检查目录权限、文件是否被占用，以及设备是否被其他程序占用。'
@@ -301,6 +301,9 @@ class DiagnosticLogs:
                 self.finish_connection('mode_changed')
                 self.simulation = config.simulation
             now = self.monotonic()
+            if present is None:
+                self.absent_since = None  # An inconclusive probe interrupts the evidence of continuous absence.
+                return self.active
             if present:
                 if self.active is None:
                     self.flush_probes(self.station)

@@ -86,3 +86,6 @@ class Bench:
             if exc is None:
                 raise
             exc.add_note(f'Cleanup failed: {cleanup}')
+            for note in getattr(cleanup, '__notes__', ()):
+                if note not in exc.__notes__:
+                    exc.add_note(note)

@@ -1,5 +1,6 @@
 """Local environment summary; never probes hardware or production services."""
 import os
+import json
 from pathlib import Path
 import platform
 import sys
@@ -27,7 +28,7 @@ def credential_status(config, saved, *, environ=None, credential_error=''):
 
 
 def environment_summary(config, saved, *, config_path, storage_root, dependency_failures=None,
-                        credential_error='', environ=None):
+                        credential_error='', environ=None, failure=None):
     """Describe effective saved settings, exposing only the presence of credentials."""
     from .upload import selected_config_path
     from .firmware import firmware_root
@@ -59,6 +60,22 @@ def environment_summary(config, saved, *, config_path, storage_root, dependency_
              '报告登记：' + (config.report_upload_url or '使用原上传配置文件中的地址'),
              'OSS：' + config.oss_endpoint + ' / ' + config.oss_bucket + ' / ' + config.oss_region,
              'OSS 目录：' + (config.oss_prefix or '桶根目录')]
+    from .firmware_library import load_target, FirmwareError
+    try:
+        _, app = load_target(config)
+        lines.extend(['APP 目标：'+app['platform']+' / '+str(app['target_version'])+' / '+Path(app['file']).name,
+                      'APP SHA256：'+app['sha256'], 'APP CRC32：'+app['crc32']])
+    except (OSError, ValueError, FirmwareError) as exc:
+        lines.append('APP 检查：'+str(exc))
+    if failure:
+        lines.extend(['', '最近一次异常（保留至下次异常）：',
+                      '异常时间：'+str(failure.get('at','')),
+                      '异常工件 SN：'+str(failure.get('motor_sn','')),
+                      '异常工序：'+str(failure.get('step_label') or failure.get('step') or '工位流程'),
+                      '异常说明：'+str(failure.get('message','')),
+                      '异常诊断：'+json.dumps(failure.get('diagnostic') or {},ensure_ascii=False,default=str),
+                      '收尾结果：'+json.dumps(failure.get('notes') or [],ensure_ascii=False,default=str),
+                      '异常日志：'+str(failure.get('log_path') or '')])
     lines.extend(CREDENTIAL_LABELS[name] + '：' + value for name, value in credentials.items())
     lines.append('旧版上传凭据：' + legacy_state)
     lines.append('报告/OSS 留空字段可兼容旧版凭据文件；取号 Key 与报告 Key 分别配置。')

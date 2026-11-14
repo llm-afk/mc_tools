@@ -263,6 +263,73 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(len(logs),2)
         self.assertEqual(sum('disconnect_confirmed' in p.read_text(encoding='utf-8') for p in logs),1)
         self.assertTrue(all('flow.start' not in p.read_text(encoding='utf-8') for p in logs))
+        probes = [event for kind,event in host.events.queue if kind=='motor_probe']
+        self.assertEqual([value['motor_probe'] for value in probes], ['present','absent','present'])
+
+    def test_early_probe_station_fault_and_recovery_publish_current_evidence(self):
+        from scripts.factory_test.station import PresenceLatch
+        from tests.test_factory_modes import window
+        host=window()
+        host.config=replace(self.config,simulation=True)
+        host.diagnostics=self.logs
+        host.latch=PresenceLatch()
+        host.demo_present=True
+        host.start_requested=host.resume_requested=False
+        host.shutdown=Mock()
+        host.shutdown.is_set.return_value=False
+        host.shutdown.wait.side_effect=[False,False,False,True]
+        seen_before_health=[]
+        def health(*args,**kwargs):
+            seen_before_health.append(host.events.queue[-1][0])
+            if len(seen_before_health)<3: raise OSError('设备状态检查失败')
+            return {}
+        host.device_health.check.side_effect=health
+        host.controller()
+        self.assertEqual(seen_before_health[0],'motor_probe')
+        outcomes=[item['motor_probe'] for kind,item in host.events.queue if kind=='motor_probe']
+        self.assertEqual(outcomes,['present','station_error'])
+        candidate=next(item for kind,item in host.events.queue if kind=='candidate')
+        self.assertEqual(candidate['motor_probe'],'present')
+        self.assertIn('stabilizing',candidate['blockers'])
+
+    def test_start_clicked_after_probe_waits_for_next_identity_sample(self):
+        from scripts.factory_test.station import PresenceLatch
+        from tests.test_factory_modes import window
+        host=window()
+        host.config=replace(self.config,simulation=True)
+        host.diagnostics=self.logs
+        host.latch=PresenceLatch()
+        host.start_requested=host.resume_requested=False
+        host.shutdown=Mock()
+        host.shutdown.is_set.return_value=False
+        observations=iter((True,True,False))
+        def wait(_):
+            host.demo_present=next(observations,None)
+            return host.demo_present is None
+        host.shutdown.wait.side_effect=wait
+        put=host.events.put
+        def on_event(event):
+            kind,value=event
+            if kind=='candidate' and value['ready']:
+                host.start_requested=True
+                host.requested_identity=host.candidate_identity(value)
+            put(event)
+        host.events.put=on_event
+        with patch('scripts.factory_test.gui.StationRunner') as runner:
+            host.controller()
+            runner.assert_not_called()
+        self.assertFalse(host.start_requested)
+        self.assertEqual([v['motor_probe'] for k,v in host.events.queue if k=='candidate'],['present','present','absent'])
+
+    def test_unknown_motor_state_does_not_close_the_connection_log(self):
+        target = self.connect()
+        self.logs.observe(False)
+        self.tick += 2.1
+        self.logs.observe(None)
+        self.tick += 3
+        self.assertIs(self.logs.observe(False),target)
+        self.tick += 2.1
+        self.assertIsNone(self.logs.observe(False))
 
     def test_stdout_fragments_are_assembled_and_last_fragment_flushed(self):
         target = self.connect()

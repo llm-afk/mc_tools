@@ -119,7 +119,10 @@ class MesClient:
         except CredentialStoreError as exc:
             raise PendingConfiguration(str(exc)) from exc
         if not key:
-            raise PendingConfiguration('请在工位配置中填写取号 API Key；也可沿用环境变量：' + self.config.api_key_env)
+            message = '请在工位配置 → 服务接口 → SN 取号填写取号 API Key'
+            if self.config.api_key_env:
+                message += '，或配置环境变量 '+self.config.api_key_env
+            raise PendingConfiguration(message)
         if current_log():
             current_log().owner.register_secret(key)
         url = self.config.mes_url.rstrip('/') + self.config.mes_sn_path

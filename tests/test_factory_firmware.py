@@ -11,9 +11,8 @@ import zlib
 from motor_platform import CanFrame
 from scripts.factory_test import firmware as fw
 from scripts.factory_test import firmware_library as library
-from scripts.factory_test.lifecycle import StationInstance
 from scripts.factory_test.station import DemoServices, StationRunner
-from scripts.factory_test.station_config import StationConfig
+from scripts.factory_test.station_config import StationConfig, load_config
 
 
 def image_bytes(platform,version):
@@ -86,15 +85,18 @@ class FirmwareTests(unittest.TestCase):
         temp=tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root=Path(temp.name)
+        folder_patch=patch.object(library, "package_firmware", return_value=self.root)
+        folder_patch.start()
+        self.addCleanup(folder_patch.stop)
 
     def setup_drive(self,family,version=245,before=240):
-        folder=self.root/family/'APP'
+        folder=self.root
         folder.mkdir(parents=True,exist_ok=True)
         path=folder/f'motor_app_{version}.bin'
         data=image_bytes(family,version)
         path.write_bytes(data)
         hardware='0111' if family=='GD' else '0221'
-        config=StationConfig(firmware_directory=str(self.root),hardware_version=hardware,model=hardware[1:])
+        config=StationConfig(hardware_version=hardware,model=hardware[1:])
         return config,Drive(family,before),path,data
 
     def test_numeric_latest_exact_file_validation_and_staged_replacement(self):
@@ -194,146 +196,105 @@ class FirmwareTests(unittest.TestCase):
         for name in ('assign_id','calibrate','allocate','print_sn','upload'): getattr(service,name).assert_not_called()
 
 
-class FirmwareLibraryTests(unittest.TestCase):
+class FlatFirmwareFolderTests(unittest.TestCase):
     def setUp(self):
-        temp = tempfile.TemporaryDirectory()
+        temp=tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
-        self.config = StationConfig(credentials_file=str(self.root/'profile/station.json'))
-        self.package = self.root/'software/firmware'
-        packaged = patch.object(library, 'package_firmware', return_value=self.package)
-        packaged.start()
-        self.addCleanup(packaged.stop)
+        self.root=Path(temp.name)/'firmware'
+        self.root.mkdir()
+        folder_patch=patch.object(library,'package_firmware',return_value=self.root)
+        folder_patch.start()
+        self.addCleanup(folder_patch.stop)
+        self.config=StationConfig()
 
-    def image(self, version, *, platform='ADM', folder=None, name=None):
-        folder = folder or self.root/'usb'
-        folder.mkdir(parents=True, exist_ok=True)
-        path = folder/(name or f'drive_app_{version}.bin')
-        path.write_bytes(image_bytes(platform, version))
+    def image(self,version,*,folder=None,platform='ADM',name=None):
+        folder=folder or self.root
+        folder.mkdir(parents=True,exist_ok=True)
+        path=folder/(name or f'motor_app_{version}.bin')
+        path.write_bytes(image_bytes(platform,version))
         return path
 
-    def test_candidates_never_arm_empty_station_and_legacy_highest_stays_usable(self):
-        self.image(245, folder=self.package/'候选/ADM')
-        self.assertEqual(library.selections(self.config), (None, None))
-        legacy = self.image(190, folder=self.package/'ADM/APP')
-        self.image(12, folder=legacy.parent)
-        self.assertEqual(fw.app_target(self.config),(190, legacy))
-        new, old = library.change_app(self.config,self.image(245))
-        self.assertTrue(old.sha256)
-        self.assertEqual(old.version,190)
-        self.assertNotEqual(old.path,legacy)
-        legacy.unlink()
-        self.image(999,folder=self.package/'ADM/APP')
-        self.assertEqual(fw.app_target(self.config),(245,new.path))
-        self.assertEqual(library.change_app(self.config,restore=old),(old,new))
+    def test_replacement_is_detected_without_import_or_restarting(self):
+        old=self.image(240)
+        self.assertEqual(fw.app_target(self.config),(240,old))
+        old.unlink()
+        new=self.image(245)
+        self.assertEqual(fw.app_target(self.config),(245,new))
+        self.assertEqual(library.load_target(self.config)[1]['target_version'],245)
+        self.assertEqual(list(self.root.iterdir()),[new])
 
-    def test_install_from_removable_source_persists_across_program_upgrade_and_restart(self):
-        source = self.image(245)
-        data = source.read_bytes()
-        new, previous = library.change_app(self.config, source)
-        self.assertIsNone(previous)
-        source.unlink()
-        switched = self.root/'new-software/firmware'
-        self.image(401,folder=switched/'候选/ADM')
-        with patch.object(library,'package_firmware',return_value=switched):
-            reloaded = StationConfig(credentials_file=self.config.credentials_file)
-            self.assertTrue(new.path.is_relative_to(self.root/'profile/firmware'))
-            self.assertEqual(library.selections(reloaded), (new,None))
-            self.assertEqual(library.load_target(reloaded)[0], data)
-
-    def test_recent_and_previous_are_platform_specific_and_custom_library_is_preserved(self):
-        custom = replace(self.config,firmware_directory=str(self.root/'custom'))
-        old, _ = library.change_app(custom,self.image(240))
-        new, prev = library.change_app(custom,self.image(245))
-        self.assertEqual(prev, old)
-        gd = replace(custom, hardware_version='0111', model='111')
-        gd_app, _ = library.change_app(gd,self.image(143,platform='GD'))
-        self.assertEqual(library.change_app(custom,restore=old),(old,new))
-        self.assertEqual(library.selections(gd),(gd_app,None))
-        self.assertEqual(library.selections(self.config),(None,None))
-
-    def test_invalid_filename_crc_wrong_platform_or_incomplete_write_keeps_old_selection(self):
-        old, _ = library.change_app(self.config,self.image(100))
-        wrong_name=self.image(101,name='missing_version.bin')
-        crc=self.image(101)
-        damaged=bytearray(crc.read_bytes()); damaged[250]^=1; crc.write_bytes(damaged)
-        for bad in (wrong_name,crc,self.image(143,platform='GD'),self.image(100,name='drive_boot_100.bin'),
-                    self.image(101,name='version_mismatch_102.bin')):
-            with self.subTest(bad=bad.name),self.assertRaises(fw.FirmwareError):
-                library.change_app(self.config,bad)
-            self.assertEqual(library.selections(self.config),(old,None))
-        for operation in ('atomic_json','atomic_replace'):
-            candidate=self.image(102 if operation=='atomic_json' else 103)
-            with patch.object(library,operation,side_effect=PermissionError('只读目录')), self.assertRaises(OSError):
-                library.change_app(self.config,candidate)
-            self.assertEqual(library.selections(self.config),(old,None))
-            self.assertEqual(library.load_target(self.config)[0],old.path.read_bytes())
-
-    def test_same_version_different_contents_remain_distinct_and_reimport_is_idempotent(self):
-        path=self.image(245)
-        first,_=library.change_app(self.config,path)
-        changed=bytearray(path.read_bytes()); changed[200]=16
-        struct.pack_into('<I',changed,len(changed)-4,zlib.crc32(changed[:-4])); path.write_bytes(changed)
-        second,prev=library.change_app(self.config,path)
-        self.assertEqual(prev,first)
-        self.assertNotEqual(first.sha256,second.sha256)
-        self.assertEqual(library.change_app(self.config,path),(second,first))
-        self.assertEqual(library.change_app(self.config,restore=first),(first,second))
-
-    def test_mismatched_fingerprint_never_silently_switches_to_manual_directory(self):
-        path=self.image(245)
-        active,_=library.change_app(self.config,path)
-        other=bytearray(path.read_bytes()); other[0]=1
-        struct.pack_into('<I',other,len(other)-4,zlib.crc32(other[:-4]))
-        active.path.write_bytes(other)
-        self.image(500,folder=self.package/'ADM/APP')
-        with self.assertRaises(fw.FirmwareError) as mismatch:
-            library.load_target(self.config)
-        self.assertEqual(mismatch.exception.diagnostic_code,'FW_SELECTION_HASH')
-        drive=Drive('ADM',1)
-        with self.assertRaises(fw.FirmwareError):
-            fw.check_firmware(self.config,drive,1,drive.sn,Mock())
-        self.assertEqual(drive.frames,[])
-
-    def test_stale_start_digest_or_rollback_snapshot_never_acts_on_a_new_image(self):
-        old,_=library.change_app(self.config,self.image(143))
-        target,_=library.change_app(self.config,self.image(245))
-        library.change_app(self.config,self.image(246))
+    def test_only_flat_app_files_are_used_and_old_indexes_are_ignored(self):
+        self.image(999,folder=self.root/'候选/ADM')
+        self.image(998,folder=self.root/'ADM/APP')
+        (self.root/'当前版本.json').write_text('{broken old index}',encoding='utf-8')
         with self.assertRaises(fw.FirmwareError) as error:
-            library.change_app(self.config,restore=old)
-        self.assertEqual(error.exception.diagnostic_code,'FW_PREVIOUS_CHANGED')
-        drive=Drive('ADM',1)
+            fw.app_target(self.config)
+        self.assertEqual(error.exception.diagnostic_code,'FW_APP_MISSING')
+        app=self.image(245)
+        self.assertEqual(fw.app_target(self.config),(245,app))
+
+    def test_version_is_decimal_not_modified_time_and_staged_files_are_ignored(self):
+        new=self.image(100)
+        self.image(99)
+        self.image(999,name='staging_999.bin.tmp')
+        self.image(999,name='missing_version.bin')
+        self.assertEqual(fw.app_target(self.config),(100,new))
+        self.image(100,name='duplicate_100.bin')
         with self.assertRaises(fw.FirmwareError) as error:
-            fw.check_firmware(self.config,drive,1,drive.sn,Mock(),expected_sha256=target.sha256)
+            fw.app_target(self.config)
+        self.assertEqual(error.exception.diagnostic_code,'FW_VERSION_AMBIGUOUS')
+
+    def test_legacy_config_path_is_ignored_without_losing_station_settings(self):
+        old=self.root.parent/'old-library'
+        self.image(999,folder=old/'ADM/APP')
+        config_file=self.root.parent/'station.json'
+        config_file.write_text(json.dumps({'firmware_directory':str(old),'target_id':7,'category':'HIPY','hardware_version':'0221'}),encoding='utf-8')
+        config=load_config(config_file)
+        self.assertEqual(config.target_id,2)
+        self.assertFalse(hasattr(config,'firmware_directory'))
+        app=self.image(245)
+        self.assertEqual(fw.app_target(config),(245,app))
+
+    def test_newly_replaced_image_after_start_snapshot_stops_before_erase(self):
+        old=self.image(245)
+        digest=library.load_target(self.config)[1]['sha256']
+        old.unlink()
+        self.image(246)
+        drive=Drive('ADM',240)
+        with self.assertRaises(fw.FirmwareError) as error:
+            fw.check_firmware(self.config,drive,1,drive.sn,Mock(),expected_sha256=digest)
         self.assertEqual(error.exception.diagnostic_code,'FW_TARGET_CHANGED')
         self.assertEqual(drive.frames,[])
         drive.disable.assert_not_called()
 
-    def test_locked_shared_library_or_corrupt_index_can_be_recovered_without_losing_file(self):
-        old,_=library.change_app(self.config,self.image(143))
-        folder=library.firmware_root(self.config)/'ADM/APP'
-        with StationInstance(folder,lock_name='.换版.lock'),self.assertRaises(fw.FirmwareError) as busy:
-            library.change_app(self.config,self.image(144))
-        self.assertEqual(busy.exception.diagnostic_code,'FW_LIBRARY_BUSY')
-        index=folder/'当前版本.json'
-        doc=json.loads(index.read_bytes())
-        doc['current']['name']='../another_143.bin'
-        index.write_text(json.dumps(doc),encoding='utf-8')
-        with self.assertRaises(fw.FirmwareError):
-            library.load_target(self.config)
-        repaired,_=library.change_app(self.config,self.image(144))
-        self.assertEqual(repaired.version,144)
-        self.assertTrue(old.path.is_file())
-        self.assertEqual(len(list(folder.glob('索引备份-*.json'))),1)
-
-    def test_can_transfer_uses_frozen_bytes_if_shared_library_changes_during_upgrade(self):
-        selected,_=library.change_app(self.config,self.image(245))
-        next_image=self.image(246)
+    def test_same_filename_changed_after_start_is_also_detected(self):
+        path=self.image(245)
+        digest=library.load_target(self.config)[1]['sha256']
+        data=bytearray(path.read_bytes());data[200]=1
+        struct.pack_into('<I',data,len(data)-4,zlib.crc32(data[:-4]))
+        path.write_bytes(data)
         drive=Drive('ADM',240)
-        def update_during_transfer(message):
+        with self.assertRaises(fw.FirmwareError) as error:
+            fw.check_firmware(self.config,drive,1,drive.sn,Mock(),expected_sha256=digest)
+        self.assertEqual(error.exception.diagnostic_code,'FW_TARGET_CHANGED')
+        self.assertEqual(drive.frames,[])
+
+    def test_transfer_uses_frozen_bytes_if_folder_changes_mid_upgrade(self):
+        path=self.image(245)
+        image,info=library.load_target(self.config)
+        drive=Drive('ADM',240)
+        def replace_during_transfer(message):
             if message=='写入 APP 10%':
-                library.change_app(self.config,next_image)
-        info=fw.check_firmware(self.config,drive,1,drive.sn,update_during_transfer,expected_sha256=selected.sha256)
-        self.assertEqual((info['after'],info['sha256']),(245,selected.sha256))
-        self.assertEqual(drive.received,selected.path.read_bytes())
+                path.unlink()
+                self.image(246)
+        result=fw.check_firmware(self.config,drive,1,drive.sn,replace_during_transfer,expected_sha256=info['sha256'])
+        self.assertEqual((result['after'],result['sha256']),(245,info['sha256']))
+        self.assertEqual(drive.received,image)
         self.assertEqual(fw.app_target(self.config)[0],246)
+
+    def test_device_identity_is_stable_when_only_folder_firmware_changes(self):
+        from scripts.factory_test.gui import FactoryWindow
+        before=dict(config_revision=1,mode_generation=1,connection_id='one-motor',node_id=1,sn='incoming',firmware_sha256='old')
+        after=dict(before,firmware_sha256='new')
+        self.assertEqual(FactoryWindow.candidate_identity(before),FactoryWindow.candidate_identity(after))
+        self.assertNotEqual(FactoryWindow.candidate_identity(before),FactoryWindow.candidate_identity(dict(after,sn='another')))

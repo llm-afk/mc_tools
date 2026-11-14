@@ -113,6 +113,20 @@ class RecordingTests(unittest.TestCase):
         self.assertEqual(events[off+1:], [('power_off', 0)])
         power.set_current.assert_not_called()
 
+    def test_graceful_stop_requires_confirmed_motor_and_power_shutdown(self):
+        for action in ('motor','power'):
+            with self.subTest(action=action):
+                motor,power=Mock(),Mock()
+                motor.stats.return_value={'fault':None}
+                motor.state.return_value=feedback(0,0)
+                failing=motor if action=='motor' else power
+                primary=OSError('no acknowledgement')
+                failing.disable.side_effect=primary
+                with patch.object(app.time,'perf_counter',side_effect=[1.,3.]), self.assertRaises(OSError) as caught:
+                    app.graceful_stop(motor,power,None,0,Mock(),Mock())
+                self.assertIs(caught.exception, primary)
+                self.assertTrue(any('工装停机未确认' in n for n in primary.__notes__))
+
     def test_stop_fault_does_not_delay_disable_for_unload(self):
         motor, power = Mock(), Mock()
         motor.state.side_effect = TimeoutError('feedback stale')

@@ -10,6 +10,7 @@ import time
 from motor_platform import Bench, MitCommand, Dynamometer, PowerSupply, Canable
 from motor_platform.components.dynamometer import detect_dynamometers
 from motor_platform.components.power_supply.discovery import resolve_power_port
+from .. import power_off, record_shutdown_failure
 from ..console import WindowConsole as TerminalConsole
 from scripts.factory_test.measurements.tn_curve.recording import CurveRecorder, event_row
 from scripts.factory_test.measurements.smoothing import append_smoothed_columns
@@ -133,17 +134,13 @@ def graceful_stop(motor, power, pending, torque, ui, drain):
             time.sleep(.005)
     finally:
         # 即使斜坡期间异常，也尝试失能；保留原始异常。
-        original = sys.exception()
-        try:
+        with record_shutdown_failure('电机失能'):
             motor.disable()
-        except Exception as exc:
-            if original is None:
-                raise
-            original.add_note(f'Disable during stop failed: {exc}')
     # 串口操作顺序完成后关闭输出，不再阶梯降低电流。
     if pending is not None:
         pending.result()
-    power.disable()
+    with record_shutdown_failure('负载电源关闭'):
+        power.disable()
     ui._notice = '停止完成：电机已失能，电源输出已关闭'
     ui.app.invalidate()
 
@@ -246,11 +243,14 @@ def run(motor, dyno, power, pool, ui, writer, summary, *, torque=None):
                 graceful_stop(motor, power, pending, applied_torque, ui, drain)
                 summary['controlled_stop_completed'] = True
             else:
-                motor.disable()
+                with record_shutdown_failure('电机失能'):
+                    motor.disable()
         except Exception as cleanup:
             if active_error is None:
                 raise
             active_error.add_note(f'Motor shutdown failed: {cleanup}')
+            for note in getattr(cleanup, '__notes__', ()):
+                active_error.add_note(note)
         finally:
             if motor_started:
                 motor.drain_states()
@@ -311,20 +311,7 @@ def main(argv=None, *, output_dir, quiet=False):
                                     torque=args.torque)
                 finally:
                     # Executor has joined any in-flight set_current before OFF.
-                    active_error = sys.exception()
-                    try:
-                        power.disable()
-                        summary['load_output_off_confirmed'] = True
-                    except Exception as exc:
-                        summary['load_output_off_confirmed'] = False
-                        summary['load_shutdown_error'] = str(exc)
-                        try:
-                            power.disable(verify=False)
-                        except Exception as fallback:
-                            exc.add_note(f'Best-effort OFF failed: {fallback}')
-                        if active_error is None:
-                            raise
-                        active_error.add_note(f'Load shutdown failed: {exc}')
+                    power_off(power, summary)
     except BaseException as exc:
         summary['error'] = repr(exc)
         summary['reason'] = 'operator_stop' if isinstance(exc, KeyboardInterrupt) else 'error'

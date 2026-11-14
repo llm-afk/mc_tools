@@ -32,7 +32,7 @@ class ReportDelivery:
                 except (OSError, ValueError, UnicodeError):
                     endpoint = ''
             if not endpoint:
-                raise UploadError('请配置报告上报地址或外置 upload-config.json 的 mes_url；报告已保存在本地')
+                raise UploadError('报告已保存在本地，请在工位配置 → 服务接口 → 报告上报填写报告接口完整地址')
             endpoint = validate_endpoint(endpoint)
             uploader = uploader or ReportUploader(config=self.config_path,endpoint=endpoint,max_attempts=1,
                 credentials_provider=credential_provider(config,self.config_path),

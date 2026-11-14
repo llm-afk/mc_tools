@@ -15,6 +15,10 @@ class CanTransport(Protocol):
     def close(self) -> None: ...
 
 
+class SdoReplyTimeout(TimeoutError):
+    """The transport stayed open but no matching SDO reply arrived before the deadline."""
+
+
 class SdoError(RuntimeError):
     pass
 
@@ -99,7 +103,7 @@ class MotorBus:
                         f"node {node_id}: SDO 0x{index:04X} rejected; raw={frame.data.hex()}"
                     )
                 return frame
-        raise TimeoutError(f"node {node_id}: SDO 0x{index:04X} timeout")
+        raise SdoReplyTimeout(f"node {node_id}: SDO 0x{index:04X} timeout")
 
     def _write_sdo(self, node_id, index, request, deadline):
         self._sdo_uncertain = True
@@ -240,7 +244,11 @@ class Motor:
 
     def disable(self, timeout=0.5, *, wait_ack=True):
         if wait_ack:
-            self._bus._disable(self.node_id, timeout)
+            try:
+                self._bus._disable(self.node_id, timeout)
+            except Exception as exc:
+                exc.add_note(f'工装停机未确认：电机 ID {self.node_id} 失能未获确认，请切断工装电源。')
+                raise
         else:
             # A timed-out enable may have executed. Permit explicit best-effort
             # disable, but never mistake a delayed enable ACK for disable proof.

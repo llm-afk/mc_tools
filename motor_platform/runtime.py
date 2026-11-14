@@ -39,6 +39,8 @@ class RuntimeShutdownError(RuntimeError):
     def __init__(self, error, *, cleanup_confirmed):
         super().__init__(f'CAN runtime stopped with error: {error}')
         self.cleanup_confirmed = cleanup_confirmed
+        if not cleanup_confirmed:
+            self.add_note('工装停机未确认：CAN 工作线程退出时电机失能未获确认，请切断工装电源。')
 
 
 class MotorChannel:
@@ -366,3 +368,6 @@ class ControlRuntime:
             if exc is None:
                 raise
             exc.add_note(f'Cleanup failed: {cleanup}')
+            for note in getattr(cleanup, '__notes__', ()):
+                if note not in exc.__notes__:
+                    exc.add_note(note)

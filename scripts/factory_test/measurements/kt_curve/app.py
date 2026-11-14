@@ -9,6 +9,7 @@ import time
 from motor_platform import Bench, Canable, Dynamometer, MitCommand, PowerSupply
 from motor_platform.components.dynamometer import detect_dynamometers
 from motor_platform.components.power_supply.discovery import resolve_power_port
+from .. import power_off, record_shutdown_failure
 from ..console import WindowConsole as TerminalConsole
 from scripts.factory_test.measurements.smoothing import append_smoothed_columns
 from scripts.factory_test.measurements.csv_streams import pack_streams
@@ -95,13 +96,8 @@ def stop_motor(motor, torque, controlled, collect):
                     break
                 time.sleep(.005)
     finally:
-        original = sys.exception()
-        try:
+        with record_shutdown_failure('电机失能'):
             motor.disable()
-        except Exception as exc:
-            if original is None:
-                raise
-            original.add_note(f'Motor disable failed: {exc}')
 
 
 def run(motor, dyno, ui, args, result):
@@ -170,22 +166,10 @@ def run(motor, dyno, ui, args, result):
             if original is None:
                 raise
             original.add_note(f'Motor shutdown failed: {exc}')
+            for note in getattr(exc, '__notes__', ()):
+                original.add_note(note)
         finally:
             collect()
-
-
-def power_off(power):
-    original = sys.exception()
-    try:
-        power.disable()
-    except Exception as exc:
-        try:
-            power.disable(verify=False)
-        except Exception as fallback:
-            exc.add_note(f'Best-effort OFF failed: {fallback}')
-        if original is None:
-            raise
-        original.add_note(f'Power shutdown failed: {exc}')
 
 
 def main(argv=None, *, output_dir, quiet=False):

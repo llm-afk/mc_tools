@@ -126,6 +126,13 @@ class BusTests(unittest.TestCase):
         self.assertEqual(len(tr.sent), 3)
         self.assertIsNone(one.enabled)
 
+    def test_unconfirmed_disable_retains_sdo_timeout_and_identifies_node(self):
+        tr=FakeTransport()
+        with self.assertRaises(TimeoutError) as caught:
+            MotorBus(tr).motor(7).disable(.001)
+        self.assertTrue(any('ID 7' in note and '失能' in note for note in caught.exception.__notes__))
+        self.assertEqual(len(tr.sent),1)
+
     def test_enable_requires_tpdo_response(self):
         tr = FakeTransport()
         with self.assertRaises(TimeoutError):

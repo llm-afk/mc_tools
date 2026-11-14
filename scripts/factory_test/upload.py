@@ -16,9 +16,8 @@ import time
 import tempfile
 import uuid
 from contextlib import contextmanager
-from urllib.parse import urlsplit
 from .station_config import (DEFAULT_REPORT_URL, DEFAULT_OSS_ENDPOINT,
-                             DEFAULT_OSS_BUCKET, DEFAULT_OSS_REGION, DEFAULT_OSS_PREFIX)
+                             DEFAULT_OSS_BUCKET, DEFAULT_OSS_REGION, DEFAULT_OSS_PREFIX, validate_report_url)
 from .service_credentials import values_for, CredentialStoreError
 
 
@@ -121,17 +120,10 @@ def report_lock(directory, name='.upload.lock'):
 
 
 def validate_endpoint(endpoint):
-    if not isinstance(endpoint, str) or not endpoint or any(ch.isspace() for ch in endpoint):
-        raise UploadError('MES 上报地址无效，请检查 upload-config.json 的 mes_url，修改后重启。')
     try:
-        parts = urlsplit(endpoint)
-        port = parts.port
-    except ValueError:
-        raise UploadError('MES 上报地址无效。') from None
-    if (parts.scheme not in ('http', 'https') or not parts.hostname or parts.username or
-            parts.password or parts.query or parts.fragment or parts.path in ('','/')):
-        raise UploadError('MES 上报地址无效。')
-    return endpoint
+        return validate_report_url(endpoint)
+    except ValueError as exc:
+        raise UploadError(str(exc)) from None
 
 
 def storage_target(endpoint=None,bucket=None,region=None,prefix=None):

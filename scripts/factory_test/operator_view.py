@@ -5,7 +5,7 @@ from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 
 from .station import STEPS
-from .station_config import MATERIALS, HARDWARE_FIELDS, material_options
+from .station_config import MATERIALS, HARDWARE_FIELDS, JOINT_NODE_IDS, material_options
 from .manual_control import ControlPage
 from .firmware_settings import FirmwarePanel
 from .version import VERSION_LABEL
@@ -48,7 +48,7 @@ def build_settings(self):
     self.fields = []
     self.field_widgets = {}
     self.service_fields = {'mes_url','mes_sn_path','printer_url','printer_name','printer_status_path',
-                           'printer_print_path','printer_copies','sn_api_key_header','report_api_key_header',
+                           'printer_print_path','printer_copies','sn_api_key_header','api_key_env','report_api_key_header',
                            'report_upload_url','upload_config','oss_endpoint','oss_bucket','oss_region','oss_prefix'}
     def field(parent, row, name, label, choices=None, width=30, editable=False):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky='w', pady=5, padx=(0, 9))
@@ -73,21 +73,22 @@ def build_settings(self):
         parent.columnconfigure(1, weight=1)
         return widget
     self.devices = field(basic, 0, 'adapter_sn', 'CANable SN', [])
-    field(basic, 1, 'target_id', '固定目标 ID')
-    self.power_port_combo=field(basic,2,'power_port','电源串口',port_options(self.config.power_port))
-    self.dyno_port_combo=field(basic,3,'dyno_port','测功机串口',port_options(self.config.dyno_port))
+    self.power_port_combo=field(basic,1,'power_port','电源串口',port_options(self.config.power_port))
+    self.dyno_port_combo=field(basic,2,'dyno_port','测功机串口',port_options(self.config.dyno_port))
     self.power_port_combo.configure(postcommand=lambda:self.power_port_combo.configure(values=port_options(self.vars['power_port'].get())))
     self.dyno_port_combo.configure(postcommand=lambda:self.dyno_port_combo.configure(values=port_options(self.vars['dyno_port'].get())))
-    field(basic,4,'firmware_directory','固件库目录（空=本机）')
-    fw_actions = ttk.Frame(basic)
-    fw_actions.grid(row=5,column=1,sticky='w',pady=4)
-    ttk.Button(fw_actions,text='选择目录',command=self.choose_firmware_directory).pack(side='left',padx=(0,6))
-    ttk.Button(fw_actions,text='打开固件目录',command=self.open_firmware_directory).pack(side='left')
-    self.firmware_panel = FirmwarePanel(self, basic, 6)
+    self.firmware_panel = FirmwarePanel(self, basic, 3)
     sn_group=ttk.LabelFrame(mes,text='工位产品配置 · 临时 SN / MES 取号共用',padding=12)
     sn_group.pack(fill='both',expand=True)
     field(sn_group, 0, 'project', '项目', list(MATERIALS), editable=True)
     self.category = field(sn_group, 1, 'category', '物料分类', material_options(self.config.project), editable=True)
+    target_hint = ttk.Label(sn_group, style='Small.TLabel')
+    target_hint.grid(row=1,column=2,sticky='w',padx=(8,0))
+    def show_product_id(*_):
+        node = JOINT_NODE_IDS.get(self.vars['category'].get().strip().upper())
+        target_hint.configure(text=f'产测 ID {node}' if node else '产测 ID 未定义')
+    self.vars['category'].trace_add('write', show_product_id)
+    show_product_id()
     self.subcategory = field(sn_group, 2, 'subcategory', '子分类', material_options(self.config.project,self.config.category), editable=True)
     field(sn_group, 3, 'factory', '工厂', ['JS', 'GF', 'XC'], editable=True)
     hardware=ttk.LabelFrame(sn_group,text='硬件版本 ABCD',padding=(10,6))
@@ -134,8 +135,9 @@ def build_settings(self):
     field(sn_service,1,'mes_sn_path','取号接口路径')
     field(sn_service,2,'sn_api_key_header','Key 请求头名称',['X-Api-Key','Authorization'],editable=True)
     secret(sn_service,3,'sn_api_key','取号 API Key')
-    ttk.Label(sn_service,text='取号 Key 留空时可沿用原环境变量。\n临时 SN 与正式 SN 的产品参数在“产品 / SN”中统一配置。',
-              foreground='#64748B').grid(row=4,column=0,columnspan=2,sticky='w',pady=14)
+    field(sn_service,4,'api_key_env','取号 Key 后备环境变量名')
+    ttk.Label(sn_service,text='取号 API Key 留空时读取此环境变量。变量名也留空时，只使用上方填写的 Key。',
+              foreground='#64748B',wraplength=570).grid(row=5,column=0,columnspan=2,sticky='w',pady=14)
     field(label_service,0,'printer_url','打印服务地址')
     field(label_service,1,'printer_status_path','状态查询路径')
     field(label_service,2,'printer_print_path','打印接口路径')
@@ -227,6 +229,7 @@ def build_view(self):
     style.configure('Section.TLabel',background='#FFFFFF',foreground='#24364D',font=('Microsoft YaHei UI',11,'bold'))
     style.configure('TButton',font=('Microsoft YaHei UI',10),padding=(14,8),background='#FFFFFF',foreground='#334155',bordercolor='#D8E2EE',lightcolor='#FFFFFF',darkcolor='#FFFFFF')
     style.map('TButton',background=[('disabled','#FFFFFF'),('pressed','#FFFFFF'),('active','#FFFFFF')],foreground=[('disabled','#A4AFBD')])
+    style.configure('Footer.TButton',padding=(12,3))
     style.configure('Primary.TButton',font=('Microsoft YaHei UI',12,'bold'),padding=(26,13),background='#2463DC',foreground='white',borderwidth=0)
     style.map('Primary.TButton',background=[('disabled','#CCD6E4'),('active','#174EBA')],foreground=[('disabled','#F8FAFC')])
     style.configure('TCheckbutton',background='#FFFFFF',font=('Microsoft YaHei UI',10))
@@ -247,7 +250,15 @@ def build_view(self):
     style.configure('Flow.Treeview',font=('Microsoft YaHei UI',10),rowheight=28,background='#FFFFFF',fieldbackground='#FFFFFF',borderwidth=0)
     style.configure('Flow.Treeview.Heading',font=('Microsoft YaHei UI',9),background='#F8FAFC',foreground='#8491A4',relief='flat')
     style.configure('Progress.Horizontal.TProgressbar',background='#2563EB',troughcolor='#E8EDF5',borderwidth=0,thickness=5)
-    shell=ttk.Frame(root,padding=(24,17))
+    def fixed_label(parent, variable, font, lines, color='#8491A4'):
+        # Height is reserved in font lines, so status text cannot move the sections below.
+        label=tk.Label(parent,textvariable=variable,font=font,height=lines,width=1,
+                       anchor='nw',justify='left',background='#FFFFFF',foreground=color,
+                       borderwidth=0,highlightthickness=0,padx=0,pady=0)
+        label.bind('<Configure>',lambda event:label.configure(wraplength=max(1,event.width)))
+        return label
+
+    shell=ttk.Frame(root,padding=(24,10,24,5))
     shell.pack(fill='both',expand=True)
     self.page_menu=tk.Menu(root,tearoff=False)
     self.page_menu.add_command(label='自动产测',command=lambda:self.switch_page('production'))
@@ -257,50 +268,48 @@ def build_view(self):
     root.bind('<F1>',self.show_help)
     root.config(menu=self.page_menu)
     self.nav_buttons={}
-    self.version_label=ttk.Label(shell,text=VERSION_LABEL,style='Small.TLabel')
-    self.version_label.pack(side='bottom',anchor='e',pady=(5,0))
     self.page_holder=ttk.Frame(shell)
     self.page_holder.pack(fill='both',expand=True)
     production=ttk.Frame(self.page_holder)
     self.production_page=production
     production.pack(fill='both',expand=True)
+    production.columnconfigure(0, weight=1)
+    production.rowconfigure(3, weight=1)  # Give spare height to the log after fitting all process steps.
     device_row=ttk.Frame(production)
-    device_row.pack(fill='x',pady=(0,13))
+    device_row.grid(row=0,column=0,sticky='ew',pady=(0,6))
     self.device_widgets={}
     for i,(name,title) in enumerate((('can','CAN 适配器'),('motor','待测电机'),('dyno','测功机'),('power','电源'),('printer','标签打印机'))):
-        card=ttk.Frame(device_row,style='Card.TFrame',padding=(14,10))
+        card=ttk.Frame(device_row,style='Card.TFrame',padding=(14,6))
         card.grid(row=0,column=i,sticky='nsew',padx=(0,8 if i<4 else 0))
         device_row.columnconfigure(i,weight=1,uniform='devices')
         ttk.Label(card,text=title,style='Small.TLabel').pack(anchor='w')
         state=tk.StringVar(value='检测中')
-        badge=ttk.Label(card,textvariable=state,style='Card.TLabel',font=('Microsoft YaHei UI',11,'bold'),foreground='#94A3B8')
-        badge.pack(anchor='w',pady=(6,2))
+        badge=ttk.Label(card,textvariable=state,width=1,style='Card.TLabel',font=('Microsoft YaHei UI',11,'bold'),foreground='#94A3B8')
+        badge.pack(fill='x',pady=(4,2))
         detail=tk.StringVar(value='等待设备状态')
-        ttk.Label(card,textvariable=detail,style='Small.TLabel',wraplength=190).pack(anchor='w')
+        fixed_label(card,detail,('Microsoft YaHei UI',9),2).pack(fill='x')
         self.device_widgets[name]=(state,badge,detail)
-    hero=ttk.Frame(production,style='Card.TFrame',padding=(22,17))
-    hero.pack(fill='x')
-    self.banner=tk.StringVar(value='请接入待测电机')
-    self.banner_label=ttk.Label(hero,textvariable=self.banner,style='Card.TLabel',font=('Microsoft YaHei UI',21,'bold'),foreground='#24364D',wraplength=810)
-    self.banner_label.grid(row=0,column=0,sticky='w')
-    self.hint=tk.StringVar(value='连接电源和 CAN 线后，点击“开始测试”。')
-    ttk.Label(hero,textvariable=self.hint,style='Small.TLabel',wraplength=810).grid(row=1,column=0,sticky='w',pady=(8,0))
+    hero=ttk.Frame(production,style='Card.TFrame',padding=(18,6))
+    hero.grid(row=1,column=0,sticky='ew')
+    self.banner=tk.StringVar(value='正在检查工位，请稍候')
+    self.banner_label=fixed_label(hero,self.banner,('Microsoft YaHei UI',20,'bold'),1,'#24364D')
+    self.banner_label.grid(row=0,column=0,sticky='ew')
+    self.hint=tk.StringVar(value='正在加载配置和设备监视。')
+    fixed_label(hero,self.hint,('Microsoft YaHei UI',9),2).grid(row=1,column=0,sticky='ew',pady=(3,0))
     hero.columnconfigure(0,weight=1)
-    self.stop=ttk.Button(hero,text='开始测试',style='Primary.TButton',command=self.start_or_stop,state='disabled')
+    self.stop=ttk.Button(hero,text='开始测试',width=12,style='Primary.TButton',command=self.start_or_stop,state='disabled')
     self.stop.grid(row=0,column=1,rowspan=2,padx=(20,0))
-    self.connection=tk.StringVar(value='来料 ID 自动识别 → 工位 ID '+str(self.config.target_id))
+    self.connection=tk.StringVar(value='等待识别来料 ID')
     self.current_sn=tk.StringVar(value='—')
     self.formal_sn=self.current_sn
     self.sn_phase=tk.StringVar(value='SN · 等待识别')
-    body=ttk.Frame(production)
-    body.pack(fill='both',expand=True,pady=(12,0))
-    flow=ttk.Frame(body,style='Card.TFrame',padding=(18,14))
-    flow.pack(side='left',fill='both',expand=True,padx=(0,12))
+    flow=ttk.Frame(production,style='Card.TFrame',padding=(18,8,18,4))
+    flow.grid(row=2,column=0,sticky='ew',pady=(6,0))
     flow_title=ttk.Frame(flow,style='Card.TFrame')
     flow_title.pack(fill='x',pady=(0,10))
     ttk.Label(flow_title,text='生产进度',style='Card.TLabel',font=('Microsoft YaHei UI',12,'bold')).pack(side='left')
     self.progress_text=tk.StringVar(value='0 / '+str(len(STEPS)))
-    ttk.Label(flow_title,textvariable=self.progress_text,style='Small.TLabel').pack(side='right')
+    ttk.Label(flow_title,textvariable=self.progress_text,width=9,anchor='e',style='Small.TLabel').pack(side='right')
     self.progress=ttk.Progressbar(flow,style='Progress.Horizontal.TProgressbar',maximum=len(STEPS))
     self.progress.pack(fill='x',pady=(0,12))
     self.steps=ttk.Treeview(flow,columns=('step','status'),show='headings',style='Flow.Treeview',height=len(STEPS),selectmode='none')
@@ -313,34 +322,22 @@ def build_view(self):
         self.steps.insert('','end',iid=name,values=(f'{index:02d}   {label}','等待'))
     for state,color in (('DONE','#138365'),('FAILED','#C13F50'),('UNKNOWN','#B27813'),('PENDING','#B27813'),('RUNNING','#2563EB')):
         self.steps.tag_configure(state,foreground=color)
-    results=ttk.Frame(body,style='Card.TFrame',padding=(20,16),width=325)
-    results.pack(side='right',fill='both')
-    results.pack_propagate(False)
-    ttk.Label(results,text='测试结果',style='Card.TLabel',font=('Microsoft YaHei UI',12,'bold')).pack(anchor='w')
-    self.result_values={}
-    for name,title in (('kt','扭矩输出误差'),('tn','电机特性曲线')):
-        ttk.Label(results,text=title,style='Small.TLabel').pack(anchor='w',pady=(19,6))
-        value=tk.StringVar(value='等待测试')
-        label=ttk.Label(results,textvariable=value,style='Card.TLabel',font=('Microsoft YaHei UI',16,'bold'),wraplength=285)
-        label.pack(anchor='w')
-        self.result_values[name]=value
-    ttk.Separator(results).pack(fill='x',pady=20)
-    ttk.Label(results,text='完成后',style='Small.TLabel').pack(anchor='w')
-    ttk.Label(results,text='取下电机，贴好标签。\n拔下后接入下一台，\n再次点击“开始测试”。',style='Card.TLabel',wraplength=275,justify='left').pack(anchor='w',pady=(8,0))
-    log_box=ttk.Frame(production,style='Card.TFrame',padding=(12,8))
-    log_box.pack(fill='x',pady=(10,0))
-    ttk.Label(log_box,text='日志',style='Small.TLabel').pack(anchor='w',pady=(0,4))
-    self.log=ScrolledText(log_box,height=6,state='disabled',font=('Consolas',9),bg='#FFFFFF',fg='#334155',relief='flat',borderwidth=0)
+    log_box=ttk.Frame(production,style='Card.TFrame',padding=(12,0))
+    log_box.grid(row=3,column=0,sticky='nsew',pady=(6,0))
+    ttk.Label(log_box,text='日志',style='Small.TLabel').pack(anchor='w',pady=(0,2))
+    self.log=ScrolledText(log_box,height=1,state='disabled',font=('Consolas',9),bg='#FFFFFF',fg='#334155',relief='flat',borderwidth=0)
     self.log.tag_configure('WARNING',foreground='#A16207')
     self.log.tag_configure('ERROR',foreground='#B91C1C')
-    self.log.pack(fill='x')
+    self.log.pack(fill='both',expand=True)
     footer=ttk.Frame(production)
-    footer.pack(fill='x',pady=(6,0))
-    self.open_report_button=ttk.Button(footer,text='打开报告目录',command=self.open_test_report)
+    footer.grid(row=4,column=0,sticky='ew',pady=(3,0))
+    self.version_label=ttk.Label(footer,text=VERSION_LABEL,width=8,anchor='e',style='Small.TLabel')
+    self.version_label.pack(side='right',padx=(10,0))
+    self.open_report_button=ttk.Button(footer,text='打开报告目录',style='Footer.TButton',command=self.open_test_report)
     self.open_report_button.pack(side='right')
-    self.open_error_log_button=ttk.Button(footer,text='打开日志目录',command=self.open_error_log)
+    self.open_error_log_button=ttk.Button(footer,text='打开日志目录',style='Footer.TButton',command=self.open_error_log)
     self.open_error_log_button.pack(side='right',padx=(0,8))
     self.upload_status=tk.StringVar(value='报告上传：离线预览' if self.config.simulation else '报告上传：准备中')
-    ttk.Label(footer,textvariable=self.upload_status,style='Small.TLabel').pack(side='left')
+    ttk.Label(footer,textvariable=self.upload_status,width=1,anchor='w',style='Small.TLabel').pack(side='left',fill='x',expand=True)
     self.control_page=ControlPage(self,self.page_holder)
     build_settings(self)

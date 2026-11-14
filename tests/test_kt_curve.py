@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace as NS
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from scripts.factory_test.measurements.kt_curve import app
 from scripts.factory_test.measurements.kt_curve.recording import Recorder, COLUMNS, OUTPUT_COLUMNS
@@ -98,6 +98,37 @@ class ConsistencyTests(unittest.TestCase):
         self.assertEqual(max(torque for _, torque in motor.commands), 30)
         self.assertEqual(motor.commands[-1][1], 0)
         self.assertLess(clock[0], 100.08)
+
+    def test_motor_disable_loss_marks_failure_even_if_ramp_succeeded(self):
+        motor=Mock()
+        failure=TimeoutError('SDO timed out')
+        motor.disable.side_effect=failure
+        with self.assertRaises(TimeoutError) as caught:
+            app.stop_motor(motor, 0, False, lambda: None)
+        self.assertIs(caught.exception, failure)
+        self.assertTrue(any('工装停机未确认' in n for n in failure.__notes__))
+        motor.disable.assert_called_once()
+
+    def test_verified_power_off_retains_primary_error_and_unverified_fallback(self):
+        from unittest.mock import call
+        for measurement_failed in (True,False):
+            with self.subTest(measurement_failed=measurement_failed):
+                primary=RuntimeError('measure failed')
+                off=TimeoutError('无法读取输出状态')
+                power=Mock()
+                power.disable.side_effect=[off, OSError('备用关闭也失败')]
+                summary={}
+                with self.assertRaises(Exception) as caught:
+                    try:
+                        if measurement_failed: raise primary
+                    finally:
+                        app.power_off(power, summary)
+                self.assertIs(caught.exception, primary if measurement_failed else off)
+                notes=caught.exception.__notes__
+                self.assertTrue(any('工装停机未确认' in n and '负载电源' in n for n in notes))
+                self.assertTrue(any('备用关闭也失败' in n for n in notes))
+                self.assertEqual(power.disable.call_args_list, [call(),call(verify=False)])
+                self.assertIs(summary['load_output_off_confirmed'], False)
 
     def test_operator_stop_ramps_down(self):
         _, _, result, motor = self.exercise(operator=True)

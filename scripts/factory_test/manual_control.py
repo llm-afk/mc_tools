@@ -11,6 +11,7 @@ from tkinter import ttk
 
 from motor_platform import Bench, Canable, MitCommand
 from motor_platform.runtime import RuntimeShutdownError
+from .version import VERSION_LABEL
 from .maintenance import Maintenance
 from .station_config import hardware_parts, hardware_torque_limit
 from .diagnostics import current_log, log_event, log_scope
@@ -162,12 +163,11 @@ class ManualSession:
     def _maintain(self, kind):
         if kind in ('zero','calibrate') and not self.profile_known:
             raise RuntimeError('未识别芯片平台，无法确定标零/校准协议')
-        from dataclasses import replace
-        maintenance=Maintenance(replace(self.config,target_id=self.node),self.stop.is_set)
+        maintenance=Maintenance(self.config,self.stop.is_set)
         if kind=='calibrate':
-            maintenance.calibrate()
+            maintenance.calibrate(self.node)
         else:
-            with maintenance.connect() as bench:
+            with maintenance.connect(self.node) as bench:
                 if kind=='zero' and self.config.model.startswith('2'):
                     # ADM 0x2002=3 是空实现；0x2070 的 enc_set_zero 回调才是真正标零。
                     maintenance.write(bench,self.node,0x2070,2,0)
@@ -380,6 +380,7 @@ class ControlPage:
         style.configure('Panel.TCombobox',background='#FFFFFF',fieldbackground='#FFFFFF',bordercolor='#D8E2EE')
         style.map('Panel.TCombobox',fieldbackground=[('readonly','#FFFFFF')],selectbackground=[('readonly','#FFFFFF')],selectforeground=[('readonly','#334155')])
         style.configure('Panel.Horizontal.TScale',background='#FFFFFF',troughcolor='#EDF2F7',bordercolor='#E2E8F0')
+        ttk.Label(self.frame,text=VERSION_LABEL,style='Small.TLabel').pack(side='bottom',anchor='e',pady=(5,0))
         body=ttk.Frame(self.frame)
         body.pack(fill='both',expand=True)
         left=ttk.Frame(body,style='Card.TFrame',padding=12)

@@ -125,8 +125,21 @@ class ServiceSettingsTests(unittest.TestCase):
 
     def test_report_full_custom_path_is_accepted_but_credentials_in_url_are_rejected(self):
         self.assertEqual(validate_endpoint(ENDPOINT),ENDPOINT)
-        for invalid in ('https://example.test','https://user:password@example.test/report','https://example.test/report?key=abc'):
-            with self.assertRaises(UploadError): validate_endpoint(invalid)
+        self.save()
+        original=self.path.read_bytes()
+        for invalid in ('https://example.test','https://example.test/','https://user:password@example.test/report','https://example.test/report?key=abc'):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(UploadError,'报告接口完整地址'): validate_endpoint(invalid)
+                with self.assertRaisesRegex(ValueError,'报告接口完整地址'):
+                    save_config(replace(self.config,report_upload_url=invalid),self.path)
+                self.assertEqual(self.path.read_bytes(),original)
+        # A legacy bare address must still open in settings for correction.
+        document=json.loads(original); document['report_upload_url']='https://legacy.example.test'
+        self.path.write_text(json.dumps(document),encoding='utf-8')
+        restored=load_config(self.path)
+        self.assertEqual(restored.report_upload_url,'https://legacy.example.test')
+        save_config(replace(restored,report_upload_url=ENDPOINT),self.path)
+        self.assertEqual(load_config(self.path).report_upload_url,ENDPOINT)
 
     def test_inline_keys_stay_out_of_public_config_snapshots_and_logs(self):
         self.save()
@@ -161,7 +174,7 @@ class ServiceSettingsTests(unittest.TestCase):
         response.json.return_value=dict(code=200,data=dict(reportKey=summary['report_key'],reportId=123))
         with patch('oss2.AuthV4',return_value=object()) as auth, \
              patch('oss2.Bucket',return_value=bucket) as factory,patch('requests.post',return_value=response) as post:
-            delivery=ReportDelivery(self.root,self.config)
+            delivery=ReportDelivery(self.root,load_config(self.path))
             delivery.enqueue(directory); delivery.step()
         auth.assert_called_once_with(KEYS['access_key_id'],KEYS['access_key_secret'])
         self.assertEqual(factory.call_args.args[1:],('https://storage.example.test','onsite-bucket'))
@@ -175,14 +188,31 @@ class ServiceSettingsTests(unittest.TestCase):
         self.assertEqual(state['status'],'SUCCEEDED')
         self.assertEqual(state['receipt']['bucket'],'onsite-bucket')
 
-    def test_clearing_inline_keys_returns_to_legacy_fallback(self):
-        self.save(); self.save(dict.fromkeys(FIELDS,''))
-        self.assertFalse(any(values_for(self.config).values()))
-        payload=mes_payload(self.config,'fallback-request')
-        http=Mock(return_value=dict(code=200,data=dict(requestId='fallback-request',count=1,sns=[SN])))
-        with patch.dict(os.environ,MIRRORME_MES_API_KEY='legacy-sn-environment-key'):
-            self.assertEqual(MesClient(self.config,http).allocate(payload),SN)
-        self.assertEqual(http.call_args.kwargs['headers']['X-Api-Key'],'legacy-sn-environment-key')
+    def test_saved_environment_name_and_inline_key_precedence_reach_sn_client(self):
+        self.config=replace(self.config,api_key_env='PMT_FIXTURE_SN_KEY',sn_api_key_header='X-Factory-SN')
+        request_id='fallback-request'
+        http=Mock(return_value=dict(code=200,data=dict(requestId=request_id,count=1,sns=[SN])))
+        environ={'MIRRORME_MES_API_KEY':'unselected-key','PMT_FIXTURE_SN_KEY':'selected-key'}
+        with patch.dict(os.environ,environ):
+            for inline, expected in ((KEYS['sn_api_key'],KEYS['sn_api_key']),('','selected-key')):
+                self.save(dict(KEYS,sn_api_key=inline))
+                restored=load_config(self.path)
+                self.assertEqual(restored.api_key_env,'PMT_FIXTURE_SN_KEY')
+                payload=mes_payload(restored,request_id)
+                self.assertEqual(MesClient(restored,http).allocate(payload),SN)
+                self.assertEqual(http.call_args.args,('https://sn.example.test/base/custom/sn',payload))
+                self.assertEqual(http.call_args.kwargs['headers'],{'X-Factory-SN':expected})
+            self.config=replace(self.config,api_key_env='')
+            self.save(dict(KEYS,sn_api_key=''))
+            restored=load_config(self.path)
+            self.assertEqual(restored.api_key_env,'')
+            self.assertEqual(credential_status(restored,{},environ=environ)['sn_api_key'],'未填写')
+            from scripts.factory_test.integrations import PendingConfiguration
+            http.reset_mock()
+            with self.assertRaisesRegex(PendingConfiguration, '填写取号 API Key') as error:
+                MesClient(restored,http).allocate(payload)
+            self.assertNotIn('环境变量',str(error.exception))
+            http.assert_not_called()
 
     def test_preexisting_OSS_receipt_without_route_keeps_original_default_binding(self):
         directory=self.report()
@@ -348,3 +378,19 @@ class ServiceSettingsTests(unittest.TestCase):
         restored=StationRunner(replace(config,credentials_file=str(self.path)),root=self.root,services=services).resume()
         self.assertEqual(restored['status'],'COMPLETE')
         self.assertEqual(restored['request_id'],record['request_id'])
+
+
+class IncidentSummaryTests(unittest.TestCase):
+    def test_support_summary_keeps_failure_context_and_app_fingerprint(self):
+        from scripts.factory_test.firmware_library import FirmwareError
+        error=dict(at='2026-11-13T12:00:00+08:00',motor_sn='unit-001',step='firmware',step_label='检查 APP 版本 / 按需 OTA',
+                   message='data ACK timeout',diagnostic=dict(code='FW_ACK_TIMEOUT',context=dict(confirmed_bytes=16)),
+                   notes=['disable acknowledged'],log_path='motor-one.log')
+        app=dict(platform='ADM',target_version=245,file='motor_app_245.bin',sha256='abc123',crc32='12345678')
+        with patch('scripts.factory_test.firmware_library.load_target',return_value=(b'',app)):
+            text=environment_summary(StationConfig(),{},config_path='station.json',storage_root='data',failure=error)
+        for expected in ('unit-001','FW_ACK_TIMEOUT','confirmed_bytes','16','motor-one.log','abc123','245','disable acknowledged'):
+            self.assertIn(expected,text)
+        with patch('scripts.factory_test.firmware_library.load_target',side_effect=FirmwareError('FW_APP_MISSING','APP missing')):
+            text=environment_summary(StationConfig(),{},config_path='station.json',storage_root='data')
+        self.assertIn('APP missing',text)

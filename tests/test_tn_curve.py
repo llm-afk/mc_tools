@@ -138,7 +138,7 @@ class CurveTests(unittest.TestCase):
         motor.disable.side_effect = RuntimeError('disable failed')
         with self.assertRaisesRegex(RuntimeError, 'enable failed') as caught:
             app.run(motor, Mock(), Mock(), Mock(), Mock(), Mock(), {})
-        self.assertIn('shutdown failed', caught.exception.__notes__[0])
+        self.assertTrue(any('工装停机未确认' in n and 'disable failed' in n for n in caught.exception.__notes__))
         with patch.object(app, 'TORQUE_FF', -0.2):
             app.validate()
         with patch.object(app, 'TORQUE_FF', 0.2), patch.object(app, 'CURRENT_STEP_A', .0001):

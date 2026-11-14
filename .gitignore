@@ -8,8 +8,4 @@ build/
 
 # Production configuration, secrets, logs and reports are stored in the user profile.
 
-# Locally built application and bundled offline printer runtime.
-/电机产测软件.exe
-/release-manifest.json
-/services/tsc-print-service/node.exe
-/services/tsc-print-service/node_modules/
+# The production EXE, release manifest and offline printer runtime are tracked.

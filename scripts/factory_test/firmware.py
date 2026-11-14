@@ -4,7 +4,7 @@ import time
 from motor_platform import CanFrame
 from motor_platform.components.motor.client import CanBusError
 from .diagnostics import log_event
-from .firmware_library import (FirmwareError, app_target, firmware_root, latest_file,
+from .firmware_library import (FirmwareError, app_target, firmware_root,
                                load_target, platform_for, read_image)
 
 
@@ -87,7 +87,7 @@ def check_firmware(config,motor,node,expected_sn,progress, *, expected_sha256=No
     image,info = load_target(config)
     target = info['target_version']
     if expected_sha256 and info['sha256'] != expected_sha256:
-        raise FirmwareError('FW_TARGET_CHANGED','点击开始后工位 APP 已变化，请按最新目标重新开测',
+        raise FirmwareError('FW_TARGET_CHANGED','点击开始后 APP 文件已变化，请按最新固件重新开测',
                             expected=expected_sha256, actual=info['sha256'], target=target)
     confirmed = motor.discover(exhaustive=True)
     if confirmed != dict(node_id=node,sn=expected_sn):
@@ -99,11 +99,6 @@ def check_firmware(config,motor,node,expected_sn,progress, *, expected_sha256=No
         if sn!=expected_sn:
             raise FirmwareError('FW_IDENTITY_CHANGED','版本查询时读回的电机 SN 已变化',observed=sn)
         info.update(node_id=node,sn=sn,before=before,adapter_sn=config.adapter_sn)
-        try:
-            boot = latest_file(root/platform/'BOOT')
-            info['local_boot'] = dict(file=boot[1].name,version=boot[0]) if boot else None
-        except (OSError,FirmwareError,ValueError) as exc:
-            log_event('firmware.boot.inventory_failed',level='WARNING',error=exc)
         info['device_boot_version'] = None  # The object dictionary exposes the application version only.
         log_event('firmware.selected',**info)
         # These readable objects are present in their respective drive OD tables.

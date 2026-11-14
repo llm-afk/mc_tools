@@ -140,7 +140,7 @@ class PrinterServiceTests(unittest.TestCase):
 
     def test_custom_station_credentials_and_label_settings_survive_restart(self):
         path=self.root/'station.json'
-        config=replace(self.config,target_id=7,hardware_version='1223',model='223',factory='JS',
+        config=replace(self.config,category='HIPY',hardware_version='1223',model='223',factory='JS',
             printer_name='Custom USB',printer_copies=2,printer_url='http://127.0.0.1:19876',
             credentials_file=str(path),mes_url='https://sn.example.test',
             report_upload_url='https://report.example.test/report',oss_bucket='custom-bucket')

@@ -105,6 +105,28 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(compare_incoming_sn('未写入 SN',config)['differences'],[])
         self.assertIn('请点击开始',FactoryWindow.candidate_prompt(dict(present=True,ready=True,product=result))[0])
 
+    def test_motor_probe_outcomes_give_distinct_operator_actions(self):
+        from scripts.factory_test.gui import FactoryWindow
+        cases = (
+            ('absent', ['motor'], '接入'),
+            ('unavailable', ['motor', 'can'], 'CAN'),
+            ('multiple', ['motor'], '一台'),
+            ('identity_error', ['motor'], '身份'),
+            ('error', ['motor'], '通信'),
+            ('station_error', ['motor'], '工程'),
+            ('present', ['target_id'], '目标 ID'),
+            ('present', ['firmware'], '固件'),
+            ('present', ['printer'], '打印'),
+            ('present', ['sn_key'], '取号'),
+        )
+        for probe, blockers, cue in cases:
+            with self.subTest(probe=probe, blockers=blockers):
+                title, hint = FactoryWindow.candidate_prompt(dict(
+                    present=probe=='present', motor_probe=probe, motor_detail='',
+                    ready=False, waiting_removal=False, blockers=blockers))
+                self.assertIn(cue, title + hint)
+                self.assertNotIn('请点击开始', title)
+
     def test_passive_dyno_probe_separates_open_error_bytes_and_valid_frames(self):
         from motor_platform.components.dynamometer.discovery import detect_dynamometers
         def device(*,port,baudrate):
@@ -254,11 +276,11 @@ class ManualTests(unittest.TestCase):
                 maintenance.write.assert_called_once_with(connection,3,index,2,value)
 
     def test_calibration_reuses_checked_completion_protocol(self):
-        session=ManualSession(StationConfig(),3,lambda *_:None)
+        session=ManualSession(StationConfig(category='HIPY'),7,lambda *_:None)
         session.profile_known=True
         with patch('scripts.factory_test.manual_control.Maintenance') as factory:
             session._maintain('calibrate')
-            factory.return_value.calibrate.assert_called_once()
+            factory.return_value.calibrate.assert_called_once_with(7)
 
     def test_maintenance_rejected_while_motor_enabled(self):
         session=ManualSession(StationConfig(),3,lambda *_:None)

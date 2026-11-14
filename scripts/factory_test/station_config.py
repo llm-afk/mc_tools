@@ -20,7 +20,7 @@ DEFAULT_PRINTER_NAME = 'Bar Code Printer T-4502 PRO'
 CONFIG_FORMAT = 2
 READINESS_LABELS = dict(can='CAN 适配器',motor='待测电机',dyno='测功机',power='电源',printer='标签打印机',
                         sn_key='取号 API Key',mes_url='MES 地址',profile='型号测试参数',
-                        firmware='APP 固件',remove='等待换件',stabilizing='等待连接稳定')
+                        target_id='产品 / SN 的物料分类未定义目标 ID',firmware='APP 固件',remove='等待换件',stabilizing='等待连接稳定')
 
 
 # Hardware ABCD uses the user's dictionary; test limits remain a separate supported profile.
@@ -30,7 +30,24 @@ HARDWARE_C = {'1': 'C2_jieke', '2': 'C2_xinzhi', '3': 'C2_PRO_jieke',
               '4': 'C2_PRO_xinzhi', '5': 'A2_jieke', '6': 'A2_xinzhi'}
 HARDWARE_D = {}
 HARDWARE_FIELDS = {'A': HARDWARE_A, 'B': HARDWARE_B, 'C': HARDWARE_C, 'D': HARDWARE_D}
+# Both documented hip categories use ID 2. Add the swing category once its MES code is known.
+JOINT_NODE_IDS = {'HIPX': 2, 'HIPY': 2, 'KNEE': 3}
 TEST_TORQUE_BY_BC = {'11': 30.0, '22': 30.0, '13': 50.0, '14': 50.0}
+
+
+def validate_report_url(value):
+    message = '请在工位配置 → 服务接口 → 报告上报填写报告接口完整地址，包含 HTTP(S) 地址和接口路径（如 /open-api/test-report）。'
+    if not isinstance(value, str) or not value or any(ch.isspace() for ch in value):
+        raise ValueError(message)
+    try:
+        parts = urlsplit(value)
+        _ = parts.port
+    except ValueError:
+        raise ValueError(message) from None
+    if (parts.scheme not in ('https', 'http') or not parts.hostname or parts.username is not None
+            or parts.password is not None or parts.query or parts.fragment or not parts.path.strip('/')):
+        raise ValueError(message)
+    return value
 
 
 def hardware_torque_limit(hardware):
@@ -113,7 +130,6 @@ class StationConfig:
     adapter_sn: str = ''
     power_port: str = 'auto'
     dyno_port: str = 'auto'
-    target_id: int = 3
     model: str = '221'
     fixture_id: str = ''
     project: str = 'C2'
@@ -140,7 +156,16 @@ class StationConfig:
     sn_api_key_header: str = 'X-Api-Key'
     report_api_key_header: str = 'X-Api-Key'
     printer_copies: int = 1
-    firmware_directory: str = ''  # Blank uses the station's persistent per-user firmware library.
+
+    @property
+    def target_id(self):
+        return JOINT_NODE_IDS.get(self.category)
+
+    def require_target_id(self):
+        node = self.target_id
+        if node is None:
+            raise ValueError(f'物料分类 {self.category} 未定义电机目标 ID，请核对工位配置 → 产品 / SN')
+        return node
 
     @property
     def base_sn(self):
@@ -157,10 +182,8 @@ class StationConfig:
         return hardware_torque_limit(self.hardware_version) is not None
 
     def validate(self, *, live=False):
-        if not isinstance(self.firmware_directory,str):
-            raise ValueError('固件目录须为路径文本')
-        if type(self.target_id) is not int or not 1 <= self.target_id <= 127:
-            raise ValueError('工位目标 ID 必须为 1～127 的整数')
+        if not isinstance(self.api_key_env,str) or '=' in self.api_key_env or '\0' in self.api_key_env:
+            raise ValueError('取号 Key 后备环境变量名请填写变量名称，或留空关闭后备读取')
         hardware_parts(self.hardware_version)
         if self.hardware_version[1:] != self.model:
             raise ValueError('MES 硬件版本 BCD 必须与工位型号一致')
@@ -206,6 +229,7 @@ class StationConfig:
         if type(self.printer_copies) is not int or not 1 <= self.printer_copies <= 50:
             raise ValueError('打印份数必须为 1～50 的整数（打印接口规定）')
         if live:
+            self.require_target_id()
             if not self.test_profile_available:
                 raise ValueError('当前平台和电机组合尚未配置产测参数，不能开始实测')
             if not self.mes_url:
@@ -236,6 +260,8 @@ def load_config(path=None):
 
 
 def save_config(config, path=None, *, credentials=None):
+    if config.report_upload_url:
+        validate_report_url(config.report_upload_url)
     config.validate()
     from .service_credentials import CredentialStore, PROTECTED_FIELD
     path = Path(path) if path else state_root()/'station.json'

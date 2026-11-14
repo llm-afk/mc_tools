@@ -19,7 +19,7 @@ from .station_config import (StationConfig, MATERIALS,
                              compare_incoming_sn, READINESS_LABELS)
 from .station import StationRunner, PresenceLatch, STEPS
 from .measurements.console import WindowConsole
-from .maintenance import Maintenance
+from .maintenance import Maintenance, MotorAbsent, MultipleMotors, MotorIdentityUnreadable
 from .device_status import DeviceHealth, AdapterMonitor, adapter_status
 from .diagnostics import DiagnosticLogs, log_scope, error_details, LOCAL_TIME
 from .service_credentials import CredentialStore, CredentialStoreError, FIELDS as SECRET_FIELDS
@@ -106,6 +106,9 @@ class FactoryWindow:
         self.dependency_failures = None
         self.resume_requested = False
         self.demo_present = True
+        self.terminal_prompt = None
+        self.next_motor = False
+        self.stopping = False
         self.last_probe = ''
         self.latest_result = None
         self.worker = None
@@ -430,9 +433,14 @@ class FactoryWindow:
         else:
             self.last_health=0.0
             self.latch.stable=0
+            self.latch.absent_since=None
             WindowConsole.cancelled.clear()
             self.production_pause.clear()
-            self.banner.set('正在恢复产测设备检查')
+            if getattr(self,'terminal_prompt',None):
+                self.set_prompt(*self.terminal_prompt)
+            else:
+                self.banner.set('正在恢复产测设备检查')
+                self.hint.set('请稍候，工位正在重新识别设备。')
 
     def start_or_stop(self):
         if self.closing:
@@ -449,7 +457,7 @@ class FactoryWindow:
         self.diagnostics.current.event('operator.start_requested', '工人点击开始',config=self.config,
                                        device_health=self.health_states,identity=self.requested_identity)
         self.stop.config(state='disabled')
-        self.banner.set('正在开始本件测试')
+        self.banner.set('请保持连接，正在核对本件电机')
         self.hint.set('测试将自动完成，请等待结果。')
 
     def device_state(self, name, state, detail):
@@ -488,10 +496,12 @@ class FactoryWindow:
         self.last_health = 0.0
         self.health_states = {}
         self.latch.stable = 0
+        self.latch.absent_since = None
         self.ready_to_start = self.start_requested = False
         if not self.busy:
             self.stop.config(state='disabled')
             if self.page == 'production':
+                self.show_idle_prompt()
                 for name in ('motor','dyno','power','printer'):
                     self.device_state(name,'CHECKING','配置已更新，正在重新检查')
 
@@ -519,7 +529,6 @@ class FactoryWindow:
             if values['production_date'].lower() in ('auto','自动当天'):
                 values['production_date'] = ''
             values['model'] = values['hardware_version'][1:]
-            values['target_id'] = int(values['target_id'])
             if 'printer_copies' in values:
                 values['printer_copies'] = int(values['printer_copies'])
             config = replace(self.config, **values, automatic=self.auto.get(),
@@ -578,7 +587,7 @@ class FactoryWindow:
             for part,code in hardware.items():
                 self.hardware_vars[part].set(code)
             if had_error:
-                self.banner.set('配置已保存，等待设备就绪')
+                self.show_idle_prompt()
             if reenabled:
                 WindowConsole.cancelled.clear()
             if changed_mode:
@@ -593,8 +602,7 @@ class FactoryWindow:
                 self.configure_delivery()
             if self.dependencies_ready and changed_printer:
                 self.configure_printer_service()
-            if (config.firmware_directory != previous_config.firmware_directory or
-                    config.hardware_version[1] != previous_config.hardware_version[1]):
+            if config.hardware_version[1] != previous_config.hardware_version[1]:
                 self.firmware_panel.refresh()
             self.refresh_environment()
             return True
@@ -609,7 +617,7 @@ class FactoryWindow:
             self.ready_to_start = False
             self.start_requested = False
             self.stop.config(state='disabled')
-            self.banner.set(message)
+            self.show_idle_prompt()
             return False
         finally:
             with self.lock:
@@ -644,11 +652,12 @@ class FactoryWindow:
         from .environment import credential_status, CREDENTIAL_LABELS
         from .firmware import firmware_root
         config=self.config
-        self.write_log(f'[工位] 固定目标 ID {config.target_id}；产品 {config.project} / {config.category} / '+
+        target = config.target_id if config.target_id is not None else '未定义'
+        self.write_log(f'[工位] 产品目标 ID {target}；产品 {config.project} / {config.category} / '+
             f'{config.subcategory}；工厂 {config.factory}；硬件 ABCD {config.hardware_version}')
         self.write_log(f'[串口] 测功机 {config.dyno_port}；电源 {config.power_port}')
         self.write_log('[SN] 临时 SN '+config.base_sn+'；正式 SN 由 MES 分配。')
-        self.write_log('[固件] 工位固件库：'+str(firmware_root(config))+'；APP 文件校验在后台进行。')
+        self.write_log('[固件] APP 文件夹：'+str(firmware_root(config))+'；APP 文件校验在后台进行。')
         self.write_log('[取号配置] '+config.mes_url.rstrip('/')+config.mes_sn_path)
         self.write_log('[打印配置] '+config.printer_url.rstrip('/')+config.printer_status_path+
             '；队列 '+(config.printer_name or '服务默认队列')+f'；每台 {config.printer_copies} 份')
@@ -719,7 +728,7 @@ class FactoryWindow:
             '\n以上为已保存状态，未验证密钥有效性。修改后点击“保存并关闭”，密钥由 Windows 当前用户加密保存。')
         text = environment_summary(self.config, self.saved_credentials, config_path=self.config_path,
             storage_root=self.storage_root or state_root(), dependency_failures=self.dependency_failures,
-            credential_error=self.credential_error)
+            credential_error=self.credential_error, failure=getattr(self,'last_failure',None))
         text += '\n\n当前界面状态（最近一次检查）：'
         for name,title in (('can','CAN 适配器'),('motor','待测电机'),('dyno','测功机'),('power','电源'),('printer','标签打印机')):
             state,_,detail = self.device_widgets[name]
@@ -741,6 +750,7 @@ class FactoryWindow:
         self.refresh_environment()
         self.root.clipboard_clear()
         self.root.clipboard_append(self.environment_text.get('1.0','end-1c'))
+        self.settings_notice.set('诊断信息已复制；不包含密钥内容。')
 
     def export_session_logs(self):
         if self.closing or self.export_thread and self.export_thread.is_alive():
@@ -761,7 +771,6 @@ class FactoryWindow:
                 self.events.put(('logs_exported',(False,str(exc))))
         self.export_thread=threading.Thread(target=save,name='diagnostic-export',daemon=True)
         self.export_thread.start()
-        self.settings_notice.set('诊断信息已复制；不包含密钥内容。')
         self.diagnostics.current.event('ui.environment.copied', '已复制本机运行环境与配置摘要', contains_credentials=False)
 
     def open_printer_config(self):
@@ -780,28 +789,14 @@ class FactoryWindow:
             self.settings_error.set('无法打开打印服务配置：'+str(exc))
             self.diagnostics.current.event('ui.printer_config.failed',level='ERROR',error=exc)
 
-    def choose_firmware_directory(self):
-        folder = filedialog.askdirectory(parent=self.settings_window,title='选择包含 GD 和 ADM 的固件目录')
-        if folder:
-            self.vars['firmware_directory'].set(folder)
-            self.apply_config()
-
-    def open_firmware_directory(self, *, boot=False):
-        from .firmware_library import FirmwareError, firmware_root, platform_for
-        config = replace(self.config,firmware_directory=self.vars['firmware_directory'].get().strip())
-        root = firmware_root(config)
+    def open_firmware_directory(self):
+        from .firmware_library import firmware_root
+        directory = firmware_root()
         try:
-            if boot:
-                directory = root/platform_for(config)/'BOOT'
-                directory.mkdir(parents=True,exist_ok=True)
-            else:
-                directory = root
-                for family in ('GD','ADM'):
-                    for role in ('APP','BOOT'):
-                        (root/family/role).mkdir(parents=True,exist_ok=True)
+            directory.mkdir(parents=True, exist_ok=True)
             os.startfile(directory)
-        except (OSError,FirmwareError) as exc:
-            self.diagnostics.current.event('firmware.directory.failed',level='ERROR',error=exc,directory=str(root))
+        except OSError as exc:
+            self.diagnostics.current.event('firmware.directory.failed', level='ERROR', error=exc, directory=str(directory))
             self.settings_error.set('无法打开固件目录：'+str(exc))
 
     def check_printer_service(self, *, test_print=False):
@@ -835,7 +830,8 @@ class FactoryWindow:
     def controller(self):
         """单所有者设备检查；每件必须收到工人的开始指令才会写入或使能。"""
         last_message = ''
-        last_candidate = None
+        last_candidate = last_probe_key = last_station_error = None
+        recent_node = None
         firmware_check_at = 0
         firmware_revision = None
         firmware_issue = firmware_file = firmware_sha256 = ''
@@ -849,8 +845,64 @@ class FactoryWindow:
                         or self.production_pause.is_set() or self.control_page.active):
                     continue
                 self.scan_in_progress = True
+                start_before_probe = self.start_requested
                 WindowConsole.cancelled.clear()
             try:
+                probe_latch = self.latch
+                motor_state, detail = 'unavailable', '请连接或选择 CAN 适配器'
+                detected, detected_id = '', None
+                if config.simulation:
+                    motor_state = 'present' if self.demo_present else 'absent'
+                    if self.demo_present:
+                        detected, detected_id = 'DEMO-UNPROGRAMMED', 1
+                    detail = '离线模拟反馈'
+                elif config.adapter_sn:
+                    config.validate()
+                    extra_ids = (recent_node,) if recent_node is not None else ()
+                    try:
+                        with log_scope(self.diagnostics.current.bind(phase='discovery')):
+                            incoming = Maintenance(config,self.station_cancelled,diagnostic_poll=True).discover(
+                                fallback=not probe_latch.wait_removal, recent_ids=extra_ids)
+                        detected, detected_id = incoming['sn'], incoming['node_id']
+                        motor_state, detail = 'present', f'已识别电机 ID {detected_id}'
+                    except InterruptedError:
+                        raise
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        detail = str(exc)
+                        if isinstance(exc, MotorAbsent):
+                            motor_state = 'absent'
+                        elif isinstance(exc, MultipleMotors):
+                            motor_state = 'multiple'
+                        elif isinstance(exc, MotorIdentityUnreadable):
+                            motor_state, detected_id = 'identity_error', exc.node_id
+                        else:
+                            motor_state = 'error'
+                        if detail != last_message:
+                            self.diagnostics.current.event('discovery.failed', '电机探测未收到有效结果',
+                                                           level='WARNING', error=exc, outcome=motor_state)
+                            self.events.put(('log','电机探测：'+detail))
+                            last_message = detail
+                if self.station_cancelled():
+                    raise InterruptedError('产测已暂停，正在交接连接')
+                generation = dict(config_revision=revision, mode_generation=mode_generation)
+                with self.lock:
+                    if (self.configuring or revision != self.config_revision or config != self.config
+                            or mode_generation != self.mode_generation or probe_latch is not self.latch):
+                        continue
+                present = motor_state == 'present'
+                if present:
+                    recent_node = detected_id
+                    last_message = ''
+                observation = present if motor_state in ('present','absent') else None
+                probe = dict(motor_probe=motor_state, motor_detail=detail, present=present,
+                             node_id=detected_id, sn=detected, target_id=config.target_id, **generation)
+                known_connection = self.diagnostics.current.context.get('connection_id')
+                probe.update(connection_id=known_connection, waiting_removal=probe_latch.wait_removal)
+                preview_key = (revision, mode_generation, motor_state, detail, detected_id, detected, probe_latch.wait_removal)
+                if preview_key != last_probe_key:
+                    self.events.put(('motor_probe', probe.copy()))
+                    last_probe_key = preview_key
+                    last_station_error = None
                 if time.monotonic()-self.last_health > 2:
                     with log_scope(self.diagnostics.current.bind(phase='device_health')):
                         health = self.device_health.check(config,
@@ -860,39 +912,25 @@ class FactoryWindow:
                                 inventory_emit=lambda info:self.events.put(('serial_inventory',dict(info,
                                     config_revision=revision,mode_generation=mode_generation))))
                     with self.lock:
-                        if self.configuring or revision != self.config_revision or config != self.config:
+                        if (self.configuring or revision != self.config_revision or config != self.config
+                                or mode_generation != self.mode_generation):
                             continue
                         self.health_states = health
                         self.last_health = time.monotonic()
                 if self.station_cancelled():
                     raise InterruptedError('产测已暂停，正在交接连接')
-                if not config.simulation and config.adapter_sn:
-                    config.validate()
-                    try:
-                        with log_scope(self.diagnostics.current.bind(phase='discovery')):
-                            incoming = Maintenance(config,self.station_cancelled,diagnostic_poll=True).discover(
-                                fallback=not self.latch.wait_removal)
-                        present,detected,detected_id = True,incoming['sn'],incoming['node_id']
-                    except InterruptedError:
-                        raise
-                    except (OSError,TimeoutError,RuntimeError) as exc:
-                        present,detected,detected_id = False,'',1
-                        if str(exc) != last_message:
-                            self.diagnostics.current.event('discovery.failed', '电机探测未收到有效结果',
-                                                           level='WARNING', error=exc)
-                            self.events.put(('log','电机探测：'+str(exc)))
-                            last_message = str(exc)
-                elif config.simulation:
-                    present,detected,detected_id = self.demo_present,'DEMO-UNPROGRAMMED',1
-                else:
-                    present,detected,detected_id = False,'',None
                 with self.lock:
                     if (self.configuring or revision != self.config_revision or config != self.config
-                            or mode_generation != self.mode_generation or self.station_cancelled()):
+                            or mode_generation != self.mode_generation or probe_latch is not self.latch):
                         continue
-                if present:
-                    last_message = ''
-                connection = self.diagnostics.observe(present,identity=dict(sn=detected,node_id=detected_id),config=config)
+                    was_waiting = probe_latch.wait_removal
+                    probe_latch.observe(observation,time.monotonic(),(config.adapter_sn, detected_id, detected))
+                if was_waiting and not probe_latch.wait_removal:
+                    self.events.put(('removed', generation))
+                    recent_node = None
+                connection = self.diagnostics.observe(observation,identity=dict(sn=detected,node_id=detected_id),config=config)
+                probe.update(connection_id=connection.context.get('connection_id') if connection else None,
+                             waiting_removal=probe_latch.wait_removal)
                 if not config.simulation:
                     with log_scope(self.diagnostics.current.bind(phase='printer_health')):
                         printer_info = self.device_health.printer.poll(config,(revision,mode_generation))
@@ -905,10 +943,6 @@ class FactoryWindow:
                                 config_revision=revision,mode_generation=mode_generation)))
                 states = {name:info['state'] for name,info in self.health_states.items()}
                 self.diagnostics.snapshot('devices.health',states)
-                was_waiting = self.latch.wait_removal
-                self.latch.observe(present,time.monotonic())
-                if was_waiting and not self.latch.wait_removal:
-                    self.events.put(('removed',dict(config_revision=revision,mode_generation=mode_generation)))
                 needed = [] if config.simulation else [key for key in ('can','dyno','power','printer') if states.get(key)!='READY']
                 support_ready = not needed
                 sn_configured=self.sn_configuration_ready(config)
@@ -919,31 +953,31 @@ class FactoryWindow:
                         firmware_file,firmware_sha256,firmware_issue=firmware_info['file'],firmware_info['sha256'],''
                     except (OSError,FirmwareError,ValueError) as exc:
                         firmware_file,firmware_sha256,firmware_issue='','',str(exc)
-                    firmware_revision,firmware_check_at=revision,time.monotonic()+3
+                    firmware_revision,firmware_check_at=revision,time.monotonic()+1
                 if firmware_issue and not config.simulation: needed.append('firmware')
                 if not present: needed.append('motor')
                 if not sn_configured: needed.append('sn_key')
                 if not config.mes_url and not config.simulation: needed.append('mes_url')
                 if not config.test_profile_available: needed.append('profile')
+                if config.target_id is None: needed.append('target_id')
                 if self.latch.wait_removal: needed.append('remove')
                 elif present and self.latch.stable < 2: needed.append('stabilizing')
                 ready = not needed
                 profile = compare_incoming_sn(detected,config) if present else {}
                 if present:
                     self.diagnostics.snapshot('connection.product_profile',profile)
-                candidate = dict(present=present,ready=ready,waiting_removal=self.latch.wait_removal,
-                    support_ready=support_ready,profile_ready=config.test_profile_available,sn_configured=sn_configured,
-                    blockers=needed,sn=detected,node_id=detected_id,target_id=config.target_id,
-                    connection_id=connection.context.get('connection_id') if connection else None,
-                    product=profile,config_revision=revision,mode_generation=mode_generation)
+                candidate = dict(probe,ready=ready,support_ready=support_ready,
+                    profile_ready=config.test_profile_available,sn_configured=sn_configured,blockers=needed,product=profile)
                 candidate.update(firmware_file=firmware_file,firmware_sha256=firmware_sha256,firmware_issue=firmware_issue)
+                last_station_error = None
                 if candidate != last_candidate:
                     self.diagnostics.snapshot('devices.readiness',candidate)
                     self.events.put(('candidate',candidate))
                     last_candidate = candidate
                 with self.lock:
                     resume = self.resume_requested
-                    if not (resume or self.start_requested):
+                    # A click during a slow peripheral check needs a new motor identity sample.
+                    if not (resume or self.start_requested and start_before_probe):
                         continue
                     self.start_requested = self.resume_requested = False
                     last_candidate = None
@@ -963,6 +997,12 @@ class FactoryWindow:
                     self.events.put((kind,value))
                     if config.simulation and kind=='step' and value['status']=='RUNNING':
                         WindowConsole.cancelled.wait(.55)  # 预览可看到真实状态机的各步骤。
+                if not config.simulation:
+                    # Files are maintained directly: capture the latest APP at actual start.
+                    from .firmware_library import load_target
+                    _, start_app = load_target(config)
+                    firmware_sha256 = start_app['sha256']
+                    self.diagnostics.current.event('firmware.start_snapshot', **start_app)
                 runner = StationRunner(config,root=self.storage_root,emit=emit,cancelled=self.station_cancelled,
                                        delivery=self.delivery,log_target=self.diagnostics.current,
                                        firmware_sha256=firmware_sha256)
@@ -998,8 +1038,22 @@ class FactoryWindow:
                                                    busy=self.busy, config=config)
                 if self.production_pause.is_set() and getattr(exc,'__notes__',None):
                     self.handoff_error='；'.join(exc.__notes__)
-                if not self.station_cancelled():
-                    self.diagnostics.observe(False,config=config)
+                with self.lock:
+                    current_scan = not self.station_cancelled() and not self.configuring and (
+                        revision, mode_generation) == (self.config_revision, self.mode_generation)
+                    if current_scan and not self.busy:
+                        self.start_requested = False
+                        self.latch.observe(None,time.monotonic())
+                if current_scan:
+                    self.diagnostics.observe(None,config=config)
+                    if not self.busy:
+                        fault = revision, mode_generation, str(exc), self.latch.wait_removal
+                        if fault != last_station_error:
+                            last_station_error = fault
+                            self.events.put(('motor_probe',dict(motor_probe='station_error',motor_detail=str(exc),
+                                present=False,node_id=None,sn='',target_id=config.target_id,
+                                connection_id=None,waiting_removal=self.latch.wait_removal,
+                                config_revision=revision,mode_generation=mode_generation)))
                 if changed:
                     self.events.put(('logged_line',str(exc)))
                 if self.busy:
@@ -1009,7 +1063,6 @@ class FactoryWindow:
                         diagnostic=self.diagnostics.redact(error_details(exc)),
                         log_path=str(self.diagnostics.current.path))))
                 elif changed:
-                    self.events.put(('waiting','等待设备就绪'))
                     last_message = str(exc)
             finally:
                 self.scan_in_progress = False
@@ -1025,27 +1078,70 @@ class FactoryWindow:
     @staticmethod
     def candidate_identity(value):
         return (value['config_revision'], value['mode_generation'], value.get('connection_id'),
-                value.get('node_id'), value.get('sn'), value.get('firmware_sha256'))
+                value.get('node_id'), value.get('sn'))
+
+    def set_prompt(self, title, hint, color='#24364D'):
+        self.banner.set(title)
+        self.hint.set(hint)
+        self.banner_label.configure(foreground=color)
+
+    def show_idle_prompt(self, candidate=None):
+        if self.terminal_prompt:
+            self.set_prompt(*self.terminal_prompt)
+        elif self.config_error:
+            self.set_prompt('请联系工程人员检查工位配置',self.config_error,'#C13F50')
+        elif not self.config.automatic:
+            self.set_prompt('设备监视已暂停','请联系工程人员在工位配置中启用设备监视。')
+        elif candidate is None:
+            self.set_prompt('正在检查工位，请稍候','正在识别设备并核对开测条件。')
+        else:
+            title,hint=self.candidate_prompt(candidate, next_motor=self.next_motor)
+            self.set_prompt(title,hint,'#138365' if candidate.get('ready') else '#24364D')
 
     @staticmethod
-    def candidate_prompt(value):
-        missing = [READINESS_LABELS[k] for k in value.get('blockers',[]) if k not in ('remove','stabilizing')]
+    def candidate_prompt(value, *, next_motor=False):
+        blockers=value.get('blockers',())
+        probe=value.get('motor_probe')
+        if probe=='station_error':
+            return '工位检查异常，请联系工程人员','开测已暂停，具体错误见下方日志。'
+        if probe=='unavailable' or 'can' in blockers:
+            return '请检查 CAN 适配器','确认 USB 已接好。接有多只适配器时，请在工位设备中选择本工位的 CANable。'
+        if probe=='multiple':
+            return '请只连接一台待测电机','当前有多个节点应答，请核对工装接线。'
+        if probe=='identity_error':
+            return '请检查电机连接，身份读取未完成','已收到节点应答，请检查电源和 CAN 线，等待读取电机身份。'
+        if probe=='error':
+            return '请检查电机通信','核对工装电源和 CAN 接线，通信恢复后会自动重新识别。'
+        if not value['present']:
+            if value.get('connection_id') and not next_motor:
+                return '电机反馈中断，请检查接线','如已取下电机，请等待工位确认断开。'
+            return ('请接入下一台电机' if next_motor else '请接入待测电机'), '固定好电机，接好电源和 CAN 线，等候自动识别。'
+        missing = [READINESS_LABELS.get(k,k) for k in blockers if k not in ('remove','stabilizing')]
         if missing:
-            title = '请接入待测电机' if not value['present'] else '等待开测条件就绪'
-            hint = '待就绪：'+'、'.join(missing)
+            if any(k in blockers for k in ('firmware','profile','target_id','sn_key','mes_url')):
+                title='请联系工程人员完善工位配置'
+            elif 'dyno' in blockers:
+                title='请检查测功机连接'
+            elif 'power' in blockers:
+                title='请检查工装电源连接'
+            elif 'printer' in blockers:
+                title='请检查标签打印机'
+            else:
+                title='请等待工位就绪'
+            hint='待就绪：'+'、'.join(missing)+'。'
             if value.get('firmware_issue'):
-                hint += '。'+value['firmware_issue']+'（工位配置 → 工位设备 → 驱动器固件）'
-        elif value['ready']:
-            title, hint = '设备已就绪，请点击开始','点击后自动完成校准、测试、写号、打印和报告。'
+                hint+='请在工位配置中核对 APP 文件，详情见日志。'
+        elif value.get('ready'):
+            title,hint='电机已就绪，请点击开始测试','点击一次即可，工位将自动完成本件测试。'
         else:
-            title, hint = '正在确认电机连接','连接稳定后可开始测试。'
+            title,hint='已检测到电机，请稍候','正在确认来料身份和工位设备。'
         product = value.get('product',{})
         if product.get('differences'):
             keys = product['differences']
             old = ' / '.join(product['observed'][key] for key in keys)
             new = ' / '.join(product['expected'][key] for key in keys)
             advisory = f'请核对来料 SN 中的 {old} 与工位配置 {new}。'
-            hint = hint+'。'+advisory if missing else advisory
+            hint = hint+advisory if missing else advisory
         return title,hint
 
     def poll(self):
@@ -1087,7 +1183,7 @@ class FactoryWindow:
             if kind.startswith('control_'):
                 self.control_page.event(kind,value)
                 continue
-            if kind in ('device_health','candidate','removed','serial_inventory') and not self.production_event_current(value):
+            if kind in ('device_health','motor_probe','candidate','removed','serial_inventory') and not self.production_event_current(value):
                 continue
             if kind=='network_status':
                 from .network_status import network_messages
@@ -1117,7 +1213,7 @@ class FactoryWindow:
                     self.dependencies_ready=True
                     self.configure_printer_service()
                     self.configure_delivery()
-                    self.banner.set('请接入待测电机')
+                    self.show_idle_prompt()
                     self.worker=threading.Thread(target=self.controller,name='factory-station',daemon=False)
                     self.worker.start()
                     if self.adapter_monitor is None:
@@ -1177,7 +1273,22 @@ class FactoryWindow:
                 ok,detail = value
                 self.export_button.config(state='normal')
                 self.settings_notice.set(('诊断包已保存至 ' if ok else '诊断包导出失败：')+detail)
-            elif kind=='candidate':
+            elif kind in ('motor_probe','candidate'):
+                probe=value.get('motor_probe') or ('present' if value['present'] else 'absent')
+                if probe!='station_error':
+                    motor_states={'present':'SIMULATED' if self.config.simulation else 'READY','absent':'OFFLINE',
+                                  'multiple':'ERROR','identity_error':'ERROR','error':'ERROR','unavailable':'WAITING'}
+                    detail=f'来料 ID {value["node_id"]}' if value['present'] else value.get('motor_detail') or '等待电机反馈'
+                    self.device_state('motor',motor_states.get(probe,'CHECKING'),detail)
+                if kind=='motor_probe':
+                    if self.busy or self.terminal_prompt or value.get('waiting_removal'):
+                        continue
+                    if not value['present'] or self.ready_identity!=self.candidate_identity(value):
+                        self.ready_to_start=False
+                        self.ready_identity=None
+                        self.stop.config(state='disabled')
+                        self.show_idle_prompt(value)
+                    continue
                 blockers=tuple(value.get('blockers',()))
                 condition='已就绪，等待点击开始测试。' if value['ready'] else '等待 '+('、'.join(READINESS_LABELS.get(item,item) for item in blockers) or '设备识别完成')
                 self.status_log('readiness',(value['ready'],blockers),'[开测条件] '+condition)
@@ -1189,45 +1300,46 @@ class FactoryWindow:
                     self.status_log('firmware.target',(value.get('firmware_file'),value.get('firmware_sha256'),issue),
                         '[固件检查] '+(issue or '目标 APP 已校验：'+str(value.get('firmware_file'))),
                         level='WARNING' if issue else 'INFO')
-                self.ready_to_start=value['ready'] and not self.config_error
+                if self.terminal_prompt and not self.busy and not value['waiting_removal']:
+                    # A configuration/page handoff may discard the one-shot removal event.
+                    # The controller's current snapshot still carries the removal latch.
+                    self.terminal_prompt=None
+                    self.next_motor=True
+                self.ready_to_start=bool(value['ready'] and not value['waiting_removal'] and not self.terminal_prompt
+                                         and not self.busy and not self.config_error and self.config.automatic)
                 self.ready_identity=self.candidate_identity(value) if self.ready_to_start else None
-                self.device_state('motor','SIMULATED' if self.config.simulation and value['present'] else 'READY' if value['present'] else 'OFFLINE',
-                    f'来料 ID {value["node_id"]}' if value['present'] else '请连接电源和 CAN 线')
                 if not self.busy:
                     self.stop.config(text='开始测试',state='normal' if self.ready_to_start and not self.start_requested else 'disabled')
-                    if self.config_error:
-                        self.banner.set(self.config_error)
-                        continue
                     if not value['waiting_removal'] and value['present']:
                         self.current_sn.set(value['sn'])
                         self.sn_phase.set('来料 SN · 已识别')
-                        self.connection.set(f'来料 ID {value["node_id"]}  →  工位 ID {value["target_id"]}')
-                    if not value['waiting_removal'] and not self.start_requested:
-                        title,hint = self.candidate_prompt(value)
-                        self.banner_label.config(foreground='#24364D')
-                        self.banner.set(title)
-                        self.hint.set(hint)
+                        self.connection.set(f'来料 ID {value["node_id"]}  →  产品目标 ID {value["target_id"] or "未定义"}')
+                    if not self.start_requested and (self.terminal_prompt or not value['waiting_removal']):
+                        self.show_idle_prompt(value)
             elif kind=='removed':
                 self.current_sn.set('—')
                 self.sn_phase.set('SN · 等待识别')
-                self.banner.set('请接入下一台电机')
-                self.hint.set('连接电源和 CAN 线后，点击“开始测试”。')
-                self.banner_label.config(foreground='#24364D')
+                self.terminal_prompt=None
+                self.next_motor=True
+                self.show_idle_prompt(dict(present=False,ready=False))
             elif kind=='busy':
                 for widget,mode in self.fields: widget.config(state='disabled' if value else mode)
                 for widget in (self.auto_control,self.resume_button,self.resolve_button):
                     widget.config(state='disabled' if value else 'normal')
                 self.page_menu.entryconfigure(2,state='disabled' if value else 'normal')
-                self.stop.config(text='停止测试' if value else '开始测试',state='normal' if value else 'disabled')
+                self.stop.config(text='停止测试' if value else '开始测试',state='normal' if value and not self.stopping else 'disabled')
                 if value:
-                    self.banner_label.config(foreground='#2563EB')
-                    self.hint.set('测试正在自动进行，请等待结果。')
+                    self.terminal_prompt=None
+                    self.next_motor=False
+                    self.ready_to_start=False
+                    if not self.stopping:
+                        self.set_prompt('测试开始，请保持连接','工位正在处理本件电机。','#2563EB')
                     for index,(name,label) in enumerate(STEPS,1): self.steps.item(name,values=(f'{index:02d}   {label}','等待'),tags=())
-                    for entry in self.result_values.values(): entry.set('等待测试')
                     self.refresh_progress()
                     for name in ('dyno','power'):
                         self.device_state(name,'IN_USE','由当前测试流程管理连接')
                 else:
+                    self.stopping=False
                     self.last_health=0
             elif kind=='step':
                 name,state=value['name'],value['status']
@@ -1235,58 +1347,58 @@ class FactoryWindow:
                     label=dict(STEPS)[name]
                     index=[n for n,_ in STEPS].index(name)+1
                     self.steps.item(name,values=(f'{index:02d}   {label}',statuses[state]),tags=(state,))
-                    if state=='RUNNING':
-                        self.banner.set(label)
-                        self.banner_label.config(foreground='#2563EB')
-                    if name in self.result_values: self.result_values[name].set(statuses[state])
+                    if state=='RUNNING' and not self.stopping and not self.terminal_prompt:
+                        title='请保持连接，等待自动测试'
+                        hint=label+'进行中，请保持电源和 CAN 连接。'
+                        if name in ('calibrate','kt','tn'):
+                            title='电机可能转动，请勿触碰'
+                        elif name=='print':
+                            title,hint='请等待标签打印','本件完成后，再核对标签并贴标。'
+                        elif name in ('report','upload'):
+                            title,hint='请稍候，正在保存本件结果',label+'完成后会提示取件。'
+                        self.set_prompt(title,hint,'#2563EB')
                     self.refresh_progress()
                 self.write_log(dict(STEPS).get(name,'两项性能测试')+'：'+statuses[state],persist=False)
             elif kind=='firmware_progress':
-                self.hint.set(value)
+                if not self.stopping and not self.terminal_prompt:
+                    self.set_prompt('请保持供电和 CAN 连接',value,'#2563EB')
                 self.write_log(value,persist=False)
             elif kind=='sn': self.current_sn.set(value)
             elif kind=='sn_phase': self.sn_phase.set(value)
             elif kind=='metrics':
+                labels={'PASS':'通过','FAIL':'未通过','PENDING':'待定','INCOMPLETE':'未完成'}
                 for section in value.get('sections',[]):
-                    if section['name'] in self.result_values:
-                        metrics=section.get('metrics',[])
-                        if section['name']=='kt':
-                            text=section['status']
-                            if metrics: text+='  '+str(metrics[0]['shown'])+metrics[0]['unit']
-                        else:
-                            text='\n'.join(m['label']+'  '+m['shown']+' '+m['unit'] for m in metrics)
-                        self.result_values[section['name']].set(text or '完成')
+                    status=section['status']
+                    details=[f"{m['label']} {m['shown']} {m['unit']}".rstrip() for m in section['metrics']]
+                    if section.get('note'): details.append(section['note'])
+                    line=f"[测量] {section['title']} · {labels.get(status,status)}"
+                    if details: line+='　'+'，'.join(details)
+                    level='ERROR' if status in ('FAIL','INCOMPLETE') else 'WARNING' if status=='PENDING' else 'INFO'
+                    self.write_log(line,persist=False,level=level)
             elif kind=='resultdir': self.latest_result=Path(value)
             elif kind=='complete':
-                self.banner_label.config(foreground='#138365')
-                self.banner.set('本件完成，请取下电机并贴好标签')
-                self.hint.set('拔下当前电机，接入下一台后再次点击“开始测试”。')
+                self.terminal_prompt=('本件通过，请取下电机并核对标签',
+                    f'核对标签 SN {value["sn"]} 后贴标。','#138365')
+                self.set_prompt(*self.terminal_prompt)
                 self.current_sn.set(value['sn'])
                 self.sn_phase.set('正式 SN · 已写入核对')
             elif kind=='failed':
-                self.banner_label.config(foreground='#C13F50')
-                self.banner.set('本件异常，请取下更换')
-                self.hint.set('流程已终止，错误日志与本件记录已保存。')
-                self.write_log(value['message'],persist=False)
+                self.last_failure=self.diagnostics.redact(dict(value,at=datetime.now().astimezone().isoformat(),motor_sn=self.current_sn.get()))
+                self.terminal_prompt=(*self.failure_prompt(value),'#C13F50')
+                self.set_prompt(*self.terminal_prompt)
+                self.write_log(value['message'],persist=False,level='ERROR')
                 diagnostic = value.get('diagnostic')
                 if diagnostic:
-                    stage = value.get('step_label') or dict(STEPS).get(value.get('step'), value.get('step') or '工位流程')
-                    self.write_log(f'阶段：{stage}；错误编号：{diagnostic["code"]}',persist=False)
+                    stage=value.get('step_label') or dict(STEPS).get(value.get('step'),'工位流程')
+                    self.write_log(f'阶段：{stage}；错误编号：{diagnostic["code"]}',persist=False,level='ERROR')
                     self.write_log('排查方向：'+diagnostic['hint'],persist=False)
-                    self.hint.set(f'{stage}异常，详细记录已保存。')
-                    if value.get('step')=='firmware':
-                        self.banner.set('固件检查或升级中止')
-                        self.hint.set(value['message'])
                 if value.get('log_path'):
                     self.write_log('本次日志：'+value['log_path'],persist=False)
-                for note in value.get('notes',[]): self.write_log(note,persist=False)
-                if any('校准停止' in note or '失能' in note for note in value.get('notes',[])):
-                    self.hint.set('请先断开工装电源，再取下更换；错误已记录。')
-            elif kind=='waiting':
-                if not self.latch.wait_removal: self.banner.set(value)
+                for note in value.get('notes',[]): self.write_log(note,persist=False,level='ERROR')
             elif kind=='log_failure':
                 self.write_log(value,persist=False)
-                self.hint.set('日志保存异常，请联系维护人员检查存储空间和目录权限。')
+                if not self.terminal_prompt and not self.stopping:
+                    self.hint.set('日志保存异常，请联系维护人员检查存储空间和目录权限。')
             elif kind in ('log','logged_line'):
                 if value.startswith('@panel '):
                     try: self.write_log(json.loads(value[7:]),persist=kind=='log')
@@ -1301,11 +1413,29 @@ class FactoryWindow:
         self.retiring_printer_services = [item for item in self.retiring_printer_services
             if item.thread is not None and item.thread.is_alive()]
 
+    @staticmethod
+    def failure_prompt(value):
+        diagnostic=value.get('diagnostic') or {}
+        notes=' '.join(value.get('notes',[])).lower()
+        if any(marker in notes for marker in ('校准停止','失能','停机未确认','切断工装电源','disable','motor shutdown',
+                                               'power shutdown','load shutdown','best-effort off')):
+            return '请先断开工装电源','停机未确认。确认电机和负载停止后再取下隔离，联系工程人员。'
+        code=diagnostic.get('code','')
+        step=value.get('step')
+        if step=='print' and (value.get('status')=='UNKNOWN' or code in
+                              ('PRINT_OUTCOME_UNKNOWN','PRINT_ACK_INVALID','PRINT_SERVICE_OUTCOME_UNKNOWN','PRINT_ACK_CONFLICT')):
+            return '打印结果未确认，请隔离本件','勿补打或贴标。请工程人员核对实体标签和打印记录。'
+        stage=value.get('step_label') or dict(STEPS).get(step,'本件测试')
+        return '请取下并隔离本件电机',f'{stage}未完成。请勿贴合格标签，详情见日志。'
+
     def request_stop(self):
         self.diagnostics.current.event('operator.stop_requested', '请求结束测试', busy=self.busy)
         self.start_requested = False
         WindowConsole.cancelled.set()
-        self.banner.set('正在结束当前测试…' if self.busy else '等待工人点击开始')
+        if self.busy:
+            self.stopping=True
+            self.stop.config(state='disabled')
+            self.set_prompt('正在停止，请等待电机停稳','工位正在执行收尾，请等待取件提示。','#B27813')
 
     def resume(self):
         if self.busy or not self.apply_config():
@@ -1327,7 +1457,8 @@ class FactoryWindow:
             record = runner.close_pending(reason)
             self.latest_result = Path(record['directory'])
             self.latch.completed()
-            self.banner.set('异常工件已留痕归档；取下工件后，可重新开启自动工位')
+            self.terminal_prompt=('请取下已归档的异常工件','将本件放入隔离区，等待工位确认断开。','#B27813')
+            self.set_prompt(*self.terminal_prompt)
             self.write_log('异常工件处理：'+reason)
         except Exception as exc:
             self.banner.set(str(exc))

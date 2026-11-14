@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 from scripts.factory_test.gui import FactoryWindow, WindowConsole, GUI_EVENT_LIMIT
 from scripts.factory_test.manual_control import ControlPage, ManualSession
+from scripts.factory_test.station import PresenceLatch
 from scripts.factory_test.station_config import StationConfig
 from motor_platform.runtime import RuntimeShutdownError
 from motor_platform import MitCommand
@@ -57,7 +58,7 @@ def window():
     host.banner=Mock(); host.hint=Mock(); host.stop=Mock()
     host.diagnostics=Mock()
     host.diagnostics.redact.side_effect=lambda value:value
-    host.latch=NS(stable=3)
+    host.latch=PresenceLatch()
     host.events=queue.Queue()
     host.dependencies_ready=True
     host.last_health=0
@@ -163,7 +164,9 @@ class ModeTests(unittest.TestCase):
             host.production_pause.set()
             return {}
         host.device_health.check.side_effect=pause
-        host.controller()
+        with patch('scripts.factory_test.gui.Maintenance') as maintenance:
+            maintenance.return_value.discover.return_value=dict(node_id=1,sn='example')
+            host.controller()
         host.diagnostics.observe.assert_not_called()
         names=[call.args[0] for call in host.diagnostics.current.event.call_args_list]
         self.assertIn('controller.paused',names)

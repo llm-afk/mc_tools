@@ -15,36 +15,39 @@ from .version import VERSION, VERSION_LABEL
 
 def check_firmware_settings(window, folder):
     import zlib
-    from .firmware_library import load_target
+    from .firmware_library import firmware_root, load_target
 
     panel = window.firmware_panel
-    def wait_for_result():
+    def inspect():
+        panel.refresh()
         deadline = time.monotonic()+5
         while panel.thread is not None and time.monotonic()<deadline:
             window.process_events()
             time.sleep(.005)
         assert panel.thread is None and not window.configuring
 
-    panel.refresh()
-    wait_for_result()
-    assert '尚未选择 APP' in panel.target.get()
+    inspect()
+    assert '未找到可用 APP' in panel.target.get()
+    assert not hasattr(panel, 'choose') and not hasattr(panel, 'undo')
+    assert 'firmware_directory' not in window.vars
+    directory = firmware_root()
+    directory.mkdir(parents=True, exist_ok=True)
+    previous = None
     for version in (240, 245):
         data = bytearray(49152)
         struct.pack_into('<H', data, len(data)-128, version)
         data[-40:-32] = b'BPKR128\0'
         struct.pack_into('<I', data, len(data)-4, zlib.crc32(data[:-4]))
-        path = folder/f'模拟发布_{version}.bin'
+        path = directory/f'模拟发布_{version}.bin'
         path.write_bytes(data)
-        with patch('scripts.factory_test.firmware_settings.filedialog.askopenfilename',return_value=str(path)):
-            panel.choose.invoke()
-        wait_for_result()
-        assert f'目标 APP {version}' in panel.target.get() and '已保存' in panel.note.get()
-        path.unlink()
-    assert str(panel.undo.cget('text'))=='恢复至 240'
-    panel.undo.invoke()
-    wait_for_result()
-    assert load_target(window.config)[1]['target_version']==240 and '目标 APP 240' in panel.target.get()
-    assert panel.undo.cget('text')=='恢复至 245'
+        if previous: previous.unlink()
+        previous = path
+        inspect()
+        assert f'目标 APP {version}' in panel.target.get()
+        assert load_target(window.config)[1]['target_version']==version
+    with patch('scripts.factory_test.gui.os.startfile') as opened:
+        window.open_firmware_directory()
+        opened.assert_called_once_with(directory)
 
 
 def check_startup_logging(window):
@@ -76,6 +79,150 @@ def check_startup_logging(window):
         follow.assert_called_once_with('end')
     window.write_log('多行缓存检查\n'*2400,persist=False)
     assert int(window.log.index('end-1c').split('.')[0])<=2200
+
+
+def check_production_layout(window):
+    root = window.root
+    original_size = root.geometry()
+    original_max = root.maxsize()
+    original_alpha = root.attributes('-alpha')
+    values = [window.banner, window.hint, window.progress_text, window.upload_status]
+    for state, _, detail in window.device_widgets.values():
+        values.extend((state, detail))
+    saved = [variable.get() for variable in values]
+    button_text = window.stop.cget('text')
+    widgets = [window.banner_label, window.stop, window.steps, window.log,
+               window.open_error_log_button, window.open_report_button, window.version_label]
+    widgets.extend(badge.master for _, badge, _ in window.device_widgets.values())
+
+    def bounds():
+        return [(widget.winfo_rootx(), widget.winfo_rooty(),
+                 widget.winfo_width(), widget.winfo_height()) for widget in widgets]
+
+    root.attributes('-alpha', 0)
+    root.maxsize(max(1280, original_max[0]), max(1080, original_max[1]))
+    last_step = window.steps.get_children()[-1]
+    heights = []
+    try:
+        root.deiconify()
+        for width, height in ((1050, 800), (1180, 900), (1180, 1000)):
+            root.geometry(f'{width}x{height}+0+0')
+            root.update()
+            row = window.steps.bbox(last_step)
+            assert row and row[1]+row[3] <= window.steps.winfo_height(), (width, height, row)
+            for widget in (window.log, window.open_error_log_button, window.open_report_button):
+                assert widget.winfo_ismapped() and widget.winfo_height()>1
+                assert widget.winfo_rooty()+widget.winfo_height() <= root.winfo_rooty()+root.winfo_height()
+            baseline = bounds()
+            # Reproduce long printer errors, changing readings, counts and operator actions.
+            for detail in ('就绪', '负载 -1234567.890 Nm / 1234567.890 rad/s',
+                           'Windows 未找到指定打印机队列，请检查驱动和 USB 连接。'*8):
+                for state, _, description in window.device_widgets.values():
+                    state.set('● 连接异常' if len(detail)>10 else '● 已连接')
+                    description.set(detail)
+                window.set_prompt('请先断开工装电源', detail)
+                window.progress_text.set('11 / 11')
+                window.upload_status.set('报告上传：待传 123456789 · 需处理 987654321 · 已完成 123456789')
+                window.stop.configure(text='停止测试')
+                root.update()
+                assert bounds()==baseline, (width, height, baseline, bounds())
+            heights.append((window.steps.winfo_height(), window.log.winfo_height(), root.winfo_height()))
+        normal, tall = heights[-2:]
+        assert tall[0] == normal[0] and tall[2] > normal[2]
+        assert tall[1]-normal[1] == tall[2]-normal[2], heights
+    finally:
+        for variable, value in zip(values, saved):
+            variable.set(value)
+        window.stop.configure(text=button_text)
+        root.withdraw()
+        root.geometry(original_size)
+        root.maxsize(*original_max)
+        root.attributes('-alpha', original_alpha)
+    return [entry[1] for entry in heights]
+
+
+def check_operator_actions(window, summary):
+    def deliver(kind, payload):
+        window.events.put((kind, payload))
+        while not window.events.empty():
+            window.process_events()
+
+    def candidate(probe='present', **updates):
+        data = dict(config_revision=window.config_revision, mode_generation=window.mode_generation,
+                    connection_id='self-check-connection', sn='DEMO', node_id=1, target_id=3,
+                    motor_probe=probe, motor_detail='', present=probe=='present', ready=False,
+                    waiting_removal=False, blockers=[], product={})
+        data.update(updates)
+        return data
+
+    window.config.automatic = window.dependencies_ready = True
+    window.auto.set(True)
+    ready = candidate(ready=True)
+    deliver('candidate', ready)
+    assert window.ready_to_start and '请点击开始' in window.banner.get()
+    assert str(window.stop.cget('state'))=='normal'
+    deliver('motor_probe', candidate('error', motor_detail='CAN read failed'))
+    assert not window.ready_to_start and str(window.stop.cget('state'))=='disabled'
+    assert '通信' in window.banner.get()+window.hint.get()
+    deliver('motor_probe', candidate())
+    assert not window.ready_to_start and str(window.stop.cget('state'))=='disabled'
+
+    for outcome in ('complete', 'print_unknown', 'stop_unconfirmed'):
+        deliver('candidate', ready)
+        assert str(window.stop.cget('state'))=='normal'
+        window.stop.invoke()
+        assert window.start_requested and str(window.stop.cget('state'))=='disabled'
+        window.start_requested = False
+        window.busy = True
+        deliver('busy', True)
+        deliver('step', dict(name='calibrate', status='RUNNING'))
+        assert '进行中' in window.steps.item('calibrate','values')
+        assert '请点击开始' not in window.banner.get() and str(window.stop.cget('text'))=='停止测试'
+        deliver('metrics', summary)
+        log = window.log.get('1.0','end')
+        for section in summary['sections']:
+            assert '[测量] '+section['title'] in log
+            assert all(metric['shown'] in log for metric in section['metrics'])
+        if outcome=='complete':
+            deliver('complete', dict(demo=True, sn='SELF-CHECK-FINAL'))
+            message = window.banner.get()+window.hint.get()
+            assert '取下' in message and '标签' in message
+        else:
+            failure = dict(step='print', step_label='标签打印', message='打印回执丢失',
+                           diagnostic=dict(code='PRINT_OUTCOME_UNKNOWN',hint='核对实体标签'), notes=[])
+            if outcome=='stop_unconfirmed':
+                failure.update(step='calibrate', step_label='自动校准', message='校准停止未确认',
+                               diagnostic=dict(code='CALIBRATION_FAILED',hint='检查电源'),
+                               notes=['电机失能回执未确认'])
+            if outcome=='stop_unconfirmed':
+                window.request_stop()
+                stopping = window.banner.get()
+                assert '停' in stopping or '结束' in stopping, stopping
+                deliver('step', dict(name='firmware', status='RUNNING'))
+                deliver('firmware_progress', '旧的进度消息')
+                assert window.banner.get()==stopping and '旧的进度消息' not in window.hint.get()
+            deliver('failed', failure)
+            message = window.banner.get()+window.hint.get()
+            if outcome=='stop_unconfirmed':
+                assert '先断开工装电源' in window.banner.get(), message
+            else:
+                assert '隔离' in message and '补打' in message, message
+        terminal = window.banner.get()
+        window.busy = False
+        window.latch.completed()
+        deliver('busy', False)
+        waiting = candidate(waiting_removal=True, blockers=['remove'])
+        deliver('motor_probe', waiting)
+        deliver('candidate', waiting)
+        assert window.banner.get()==terminal
+        assert not window.ready_to_start and str(window.stop.cget('state'))=='disabled'
+        window.latch.observe(False, 0)
+        window.latch.observe(False, 3)
+        deliver('removed', dict(config_revision=window.config_revision,mode_generation=window.mode_generation))
+        deliver('candidate', candidate('absent', blockers=['motor'], connection_id=None, node_id=None, sn=''))
+        assert '接入' in window.banner.get() and '下一台' in window.banner.get()
+    window.config.automatic = window.dependencies_ready = False
+    window.auto.set(False)
 
 
 def check_operator_manual(window):
@@ -220,6 +367,7 @@ def run(destination):
             assert window.diagnostics.runtime_info()['version']==VERSION
             menu = [window.page_menu.entrycget(i, 'label') for i in range(4)]
             assert menu == ['自动产测', '电机调试', '工位配置', 'Help']
+            layout_heights = check_production_layout(window)
             check_operator_manual(window)
             check_startup_logging(window)
             assert not hasattr(window, 'sim_control') and not hasattr(window, 'demo_button')
@@ -231,6 +379,7 @@ def run(destination):
             assert real_window.config.simulation is False
             real_window.shutdown.set(); real_window.diagnostics.close(); real_root.destroy()
             assert not hasattr(window, 'sn_entry')
+            assert 'target_id' not in window.vars and window.config.target_id == 3
             assert 'hardware_version' in window.vars
             assert set(window.hardware_vars) == set('ABCD')
             assert window.vars['hardware_version'].get() == '0221'
@@ -378,7 +527,7 @@ def run(destination):
             while not window.events.empty(): window.events.get_nowait()
             from .service_credentials import CredentialStore
             service_names=('mes_url','mes_sn_path','printer_url','printer_status_path','printer_print_path',
-                           'report_upload_url','sn_api_key_header','report_api_key_header','printer_copies',
+                           'report_upload_url','sn_api_key_header','api_key_env','report_api_key_header','printer_copies',
                            'oss_endpoint','oss_bucket','oss_region','oss_prefix')
             assert all(name in window.vars for name in service_names)
             assert window.printer_check_button.cget('text')=='检查打印服务'
@@ -411,12 +560,18 @@ def run(destination):
             window.vars['oss_region'].set('self-check-region')
             window.vars['oss_prefix'].set('self-check/reports')
             window.vars['sn_api_key_header'].set('X-Station-Key')
+            window.vars['api_key_env'].set('FACTORY_SELF_CHECK_SN_KEY')
             window.vars['report_api_key_header'].set('X-Report-Key')
             window.vars['printer_copies'].set('2')
             for name,value in keys.items(): window.secret_vars[name].set(value)
             assert window.apply_config() is True
             assert window.config.mes_url==initial['mes_url']  # Edits are staged until an explicit save.
             assert not any(CredentialStore(config_path).load().values())
+            window.vars['report_upload_url'].set('https://report.example.test')
+            assert window.apply_config(commit_services=True) is False
+            assert '报告接口完整地址' in window.settings_error.get()
+            assert window.config.report_upload_url == initial['report_upload_url']
+            window.vars['report_upload_url'].set('https://report.example.test/custom/reports')
             assert window.apply_config(commit_services=True) is True
             assert window.config.mes_sn_path=='/fixture/sn/create'
             assert window.config.oss_bucket=='self-check-bucket'
@@ -438,6 +593,7 @@ def run(destination):
             replica_root.withdraw()
             replica=FactoryWindow(replica_root,config_path=config_path,storage_root=folder/'reload',preview_only=True)
             assert all(replica.secret_vars[name].get()==value for name,value in keys.items())
+            assert replica.vars['api_key_env'].get()=='FACTORY_SELF_CHECK_SN_KEY'
             assert replica.vars['oss_bucket'].get()=='self-check-bucket'
             replica.shutdown.set(); replica.diagnostics.close(); replica_root.destroy()
             for name,value in initial.items(): window.vars[name].set(value)
@@ -466,6 +622,7 @@ def run(destination):
             window.vars['subcategory'].set('xy12')
             window.vars['factory'].set('z9')
             assert window.selection_changed('project') is True
+            assert window.config.target_id is None
             assert (window.config.project,window.config.category,window.config.subcategory,window.config.factory) == (
                 'X2','ABCD','XY12','Z9')
             window.hardware_vars['A'].set('1')
@@ -476,6 +633,10 @@ def run(destination):
             window.vars['category'].set(config.category)
             window.vars['subcategory'].set(config.subcategory)
             assert window.selection_changed('project') is True
+            for category, expected in (('hipx',2),('hipy',2),('knee',3)):
+                window.vars['category'].set(category)
+                assert window.selection_changed('category') is True
+                assert window.config.target_id == load_config(config_path).target_id == expected
             window.vars['factory'].set('js')
             assert window.selection_changed('factory') is True and window.config.factory == 'JS'
             window.vars['production_date'].set('260230')
@@ -549,6 +710,7 @@ def run(destination):
             store.put.return_value = dict(etag='offline', request_id='offline')
             mes.register.side_effect = lambda body:dict(reportId=1, reportKey=body['reportKey'], duplicated=False)
             summary = record['summary']
+            check_operator_actions(window, summary)
             summary['demo'] = False  # Synthetic fixture only, in an isolated temporary directory with I/O blocked.
             directory = Path(record['directory'])
             live_directory = folder/'delivery/data'/directory.name
@@ -624,6 +786,7 @@ def run(destination):
                 guard.assert_not_called()
             result.update(ok=True, dependencies=dependencies, menu=menu, white_theme=True,
                           startup_log_visible=True,network_state_local_only=True,log_scroll_preserved=True,
+                          production_log_heights_px=layout_heights,production_layout_stable=True,operator_action_prompts=True,
                           operator_manual=True,operator_manual_chapters=len(window.help_view.chapters),
                           production_defaults=True, single_production_ui=True, adapter_auto_selection=True,
                           adapter_dropdown_live=True, adapter_online_choices_only=True,
@@ -645,7 +808,7 @@ def run(destination):
                           file_action_buttons=True, usb_open_attempts=0,
                           directory_actions=True, connection_scoped_logs=True, log_retention_days=30,
                           structured_error_diagnostics=True,printer_invalid_ack_unknown=True,
-                          boot_log_export=True,firmware_first_step=True,firmware_library_ui=True,
+                          boot_log_export=True,firmware_first_step=True,firmware_folder_auto=True,
                           service_addresses_editable=True,inline_credentials_encrypted=True,
                           credentials_reloaded_in_ui=True,service_changes_staged=True,
                           printer_named_default=True,environment_summary=True,diagnostic_copy_redacted=True,

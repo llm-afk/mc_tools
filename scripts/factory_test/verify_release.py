@@ -14,14 +14,13 @@ REQUIRED_CHECKS = (
     'position_wheel_step_0_1', 'waveform_thin', 'waveform_60fps', 'printer_named_default',
     'environment_summary', 'diagnostic_copy_redacted', 'single_instance_lock', 'configuration_events_fenced',
     'shutdown_waits_for_workers', 'printer_service_ui', 'printer_service_lifecycle', 'boot_log_export',
-    'firmware_first_step', 'firmware_library_ui', 'operator_manual',
-    'startup_log_visible', 'network_state_local_only', 'log_scroll_preserved',
+    'firmware_first_step', 'firmware_folder_auto', 'operator_manual',
+    'startup_log_visible', 'network_state_local_only', 'log_scroll_preserved', 'operator_action_prompts', 'production_layout_stable',
 )
 
 
 def verify(release):
-    from .build_release import ROOT, digest, source_files
-    from .firmware_library import read_image, file_version
+    from .build_release import ROOT, digest, source_files, firmware_record
 
     release = Path(release).resolve()
     manifest = json.loads((release/'release-manifest.json').read_bytes())
@@ -41,16 +40,13 @@ def verify(release):
     for name, expected in manifest['files'].items():
         assert digest(release/name) == expected, name
     assert all(manifest['files'][name] == expected for name, expected in sources.items())
-    assert set(manifest['firmware_candidates']) == {'GD', 'ADM'}
-    for platform, item in manifest['firmware_candidates'].items():
-        path = release/item['file']
-        assert path.parent == release/'firmware/候选'/platform
-        info = read_image(path, file_version(path), platform)[1]
-        assert (info['target_version'], info['sha256']) == (item['version'], item['sha256'])
+    current_app = firmware_record(release)
     return dict(ok=True, version=VERSION, executable=str(release/'电机产测软件.exe'),
                 files=len(manifest['files']), source_files=len(sources), guarded_tests=proof['guarded_tests'],
                 printer_tests=manifest['printer_tests']['tests'],
-                source_matches_release=True, hardware_or_network_used=False)
+                source_matches_release=True, hardware_or_network_used=False,
+                firmware_version=current_app['version'], firmware_file=current_app['file'],
+                firmware_matches_build=current_app == manifest['firmware_app'])
 
 
 def main():

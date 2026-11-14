@@ -218,6 +218,7 @@ class StationRunner:
 
     def begin(self, detected_sn, detected_id=None):
         self.config.validate(live=not self.config.simulation)
+        target_id = self.config.require_target_id()
         if self.pending():
             raise RecoveryRequired('有未完成工件，请先选择“继续未完成工件”，禁止重新取号')
         session = str(uuid.uuid4())
@@ -226,7 +227,7 @@ class StationRunner:
         directory.mkdir(parents=True)
         base = self.config.base_sn
         self.record = dict(session=session, directory=str(directory), status='RUNNING',
-                           demo=self.config.simulation, config=asdict(self.config),
+                           demo=self.config.simulation, config=dict(asdict(self.config), target_id=target_id),
                            detected_sn=detected_sn, detected_id=detected_id or self.config.target_id,
                            base_sn=base, steps={}, firmware=None,
                            production_date=production_date,
@@ -243,6 +244,9 @@ class StationRunner:
         if not record:
             raise RecoveryRequired('没有未完成工件')
         original_fields=record['config']
+        target_id = self.config.require_target_id()
+        if original_fields.get('target_id', target_id) != target_id:
+            raise RecoveryRequired('已记录的工件目标 ID 与当前物料分类不一致，请核对原工件记录后处理')
         restored=asdict(StationConfig())
         restored.update({key:value for key,value in original_fields.items() if key in restored})
         current=asdict(self.config)
@@ -252,7 +256,7 @@ class StationRunner:
         if restored != current:
             raise RecoveryRequired('当前配置与未完成工件不一致，请恢复原工位配置后再继续')
         self.record = record
-        record['config']=asdict(self.config)
+        record['config']=dict(asdict(self.config), target_id=target_id)
         if self.log:
             self.log.event('flow.resume', '恢复已保存流程', session=record['session'],
                            previous_connection_log=record.get('connection_log'), steps=record['steps'])
@@ -375,11 +379,19 @@ class StationRunner:
                 log_event('test.analysis', status=summary['status'], sections=summary.get('sections'),
                           limits=summary.get('limits'), stages=summary.get('stages'))
                 self.emit('metrics', summary)
-                atomic_json(directory/'summary.json', summary)
-                if summary['status'] != 'PASS':
-                    # 失败也保留测试报告，但不会进入取号、写号或打印。
+                if summary['status'] == 'PASS':
+                    atomic_json(directory/'summary.json', summary)
+                    return
+                failure = RuntimeError(summary.get('error') or '测试未通过或未完成；不会申请正式 SN')
+                for note in summary.get('error_notes', []):
+                    failure.add_note(note)
+                try:
+                    atomic_json(directory/'summary.json', summary)
                     self.services.render(directory, summary)
-                    raise RuntimeError('测试未通过或未完成；不会申请正式 SN')
+                except Exception as report_error:
+                    failure.add_note('保存失败件报告时出现异常：'+str(report_error))
+                    raise failure from report_error
+                raise failure
             self.action('measure', measure)
             def allocate():
                 if 'mes_payload' not in record:
@@ -438,7 +450,7 @@ class StationRunner:
                           level='ERROR', error=save_exc, original_diagnostic=record['diagnostic'])
                 record['error_notes'].append(redact('本件状态保存失败：'+str(save_exc)))
             self.emit('step', dict(name=step, status=status))
-            self.emit('failed', dict(message=record['error'], notes=record['error_notes'], step=step,
+            self.emit('failed', dict(message=record['error'], notes=record['error_notes'], step=step, status=status,
                 step_label=dict(STEPS).get(step,'两项性能测试' if step=='measure' else step),
                 diagnostic=record['diagnostic'], log_path=str(self.log.path) if self.log else None))
         return record
@@ -448,6 +460,7 @@ class PresenceLatch:
     """完成/失败后要求持续离线；USB 短暂抖动不会触发同一件重测。"""
     def __init__(self, absence_seconds=2.0):
         self.absence_seconds = absence_seconds
+        self.identity = None
         self.wait_removal = False
         self.absent_since = None
         self.stable = 0
@@ -457,7 +470,12 @@ class PresenceLatch:
         self.absent_since = None
         self.stable = 0
 
-    def observe(self, present, now):
+    def observe(self, present, now, identity=None):
+        if present is None:
+            # An unusable adapter, bus fault or unreadable identity is no evidence of removal.
+            self.absent_since = None
+            self.stable = 0
+            return False
         if self.wait_removal:
             if present:
                 self.absent_since = None
@@ -467,5 +485,8 @@ class PresenceLatch:
                 self.wait_removal = False
                 self.stable = 0
             return False
+        if present and self.identity is not None and self.identity != identity:
+            self.stable = 0
+        self.identity = identity if present else None
         self.stable = self.stable+1 if present else 0
         return self.stable == 2

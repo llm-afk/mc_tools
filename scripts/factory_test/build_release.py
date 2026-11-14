@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 
-from .firmware_library import file_version, read_image
+from .firmware_library import MAX_BYTES, latest_file, read_image
 from .station_config import atomic_json
 from .storage import atomic_replace
 from .verify_release import REQUIRED_CHECKS, verify
@@ -19,8 +19,7 @@ from .version import VERSION
 
 ROOT = Path(__file__).resolve().parents[2]
 PRINTER_SERVICE = ROOT/'services/tsc-print-service'
-CANDIDATE_ROOT = ROOT/'firmware/候选'
-BUNDLED_APPS = {'GD':'dgm_app_released_143.bin', 'ADM':'ADM32F036_mc_app_released_fw_245.bin'}
+FIRMWARE_ROOT = ROOT/'firmware'
 
 
 def digest(path):
@@ -28,10 +27,8 @@ def digest(path):
 
 
 def source_files():
-    for name in ('README.md', 'pyproject.toml', '.gitignore', 'install_drivers.cmd'):
+    for name in ('README.md', 'pyproject.toml', '.gitignore', '.gitattributes', 'install_drivers.cmd'):
         yield ROOT/name
-    for platform, name in BUNDLED_APPS.items():
-        yield CANDIDATE_ROOT/platform/name
     for folder in ('motor_platform', 'scripts', 'tests', 'docs'):
         for path in sorted((ROOT/folder).rglob('*')):
             if any(part in ('data', '__pycache__', '.factory-state') for part in path.relative_to(ROOT).parts):
@@ -45,10 +42,22 @@ def source_files():
 
 def managed_files():
     paths = set(source_files())
-    for folder in (ROOT/'drivers', ROOT/'firmware', PRINTER_SERVICE):
+    for folder in (ROOT/'drivers', PRINTER_SERVICE):
         paths.update(path for path in folder.rglob('*')
                      if path.is_file() and '__pycache__' not in path.parts)
     return sorted(paths)
+
+
+def firmware_record(project):
+    project = Path(project)
+    found = latest_file(project/'firmware')
+    if found is None:
+        raise FileNotFoundError('firmware 目录缺少 APP 固件')
+    version, path = found
+    platform = 'ADM' if path.stat().st_size == MAX_BYTES['ADM'] else 'GD'
+    info = read_image(path, version, platform)[1]
+    return dict(file=path.relative_to(project).as_posix(), platform=platform,
+                version=version, sha256=info['sha256'], crc32=info['crc32'])
 
 
 def run_hidden(arguments, *, cwd, env, timeout=60):
@@ -77,6 +86,7 @@ def build_in(work):
     for name in ('node.exe', 'node_modules', 'LICENSE-node.txt'):
         if not (PRINTER_SERVICE/name).exists():
             raise FileNotFoundError('缺少打印运行环境：'+str(PRINTER_SERVICE/name))
+    initial_firmware = firmware_record(ROOT)
     initial = {p.relative_to(ROOT).as_posix(): digest(p) for p in source_files()}
     initial_files = {p.relative_to(ROOT).as_posix(): digest(p) for p in managed_files()}
     temporary = work/'tmp'
@@ -115,12 +125,9 @@ def build_in(work):
             or check['hardware_or_network_used'] is not False or check['usb_open_attempts'] != 0):
         raise RuntimeError(check)
 
-    candidates = {}
-    for platform, name in BUNDLED_APPS.items():
-        path = CANDIDATE_ROOT/platform/name
-        info = read_image(path, file_version(path), platform)[1]
-        candidates[platform] = dict(file=path.relative_to(ROOT).as_posix(), version=info['target_version'],
-                                    sha256=info['sha256'], crc32=info['crc32'])
+    firmware_app = firmware_record(ROOT)
+    if firmware_app != initial_firmware:
+        raise RuntimeError('构建期间 APP 固件已更换，请重新构建。')
     renderer = run_hidden([str(PRINTER_SERVICE/'node.exe'), str(PRINTER_SERVICE/'index.js'), '--self-check'],
                           cwd=PRINTER_SERVICE, env=isolated_env)
     renderer_check = json.loads(renderer.stdout.strip())
@@ -140,7 +147,7 @@ def build_in(work):
     if raw_check != dict(ok=True, hardwareUsed=False):
         raise RuntimeError(raw_check)
     current_files = {p.relative_to(ROOT).as_posix(): digest(p) for p in managed_files()}
-    if current_files != initial_files:
+    if current_files != initial_files or firmware_record(ROOT) != initial_firmware:
         raise RuntimeError('构建期间源码或依赖发生变化，请重新构建。')
     manifest = dict(
         version=VERSION, channel='production', project='pmt',
@@ -148,7 +155,7 @@ def build_in(work):
         executable=executable.name, sha256=digest(executable), bytes=executable.stat().st_size,
         python=sys.version, isolated_self_check=check, regression=regression, source_files=initial,
         printer_renderer_check=renderer_check, printer_tests=printer_tests,
-        printer_raw_helper_compile_check=raw_check, firmware_candidates=candidates,
+        printer_raw_helper_compile_check=raw_check, firmware_app=firmware_app,
         files=dict(current_files, **{executable.name:digest(executable)}),
     )
     publish_executable(executable)

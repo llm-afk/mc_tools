@@ -3,7 +3,22 @@ from contextlib import contextmanager
 import time
 
 from motor_platform import Bench, Canable, CanFrame, SdoError
+from motor_platform.components.motor.client import SdoReplyTimeout
 from .diagnostics import current_log, log_event
+
+
+class MotorAbsent(TimeoutError):
+    """The adapter completed the requested discovery scan with no matching node."""
+
+
+class MultipleMotors(RuntimeError):
+    pass
+
+
+class MotorIdentityUnreadable(RuntimeError):
+    def __init__(self, node, cause):
+        self.node_id = node
+        super().__init__(f'电机 ID {node} 已响应，但 SN 读取未完成：{cause}')
 
 
 class Maintenance:
@@ -31,7 +46,7 @@ class Maintenance:
     @contextmanager
     def connect(self, node=None):
         self.check_stop()
-        node = self.config.target_id if node is None else node
+        node = self.config.require_target_id() if node is None else node
         started = time.perf_counter()
         self.event('transport.open', adapter_sn=self.config.adapter_sn, node_id=node)
         try:
@@ -124,12 +139,15 @@ class Maintenance:
             self.event('motor.sn.read.complete',node_id=self.config.target_id,sn=sn,raw=raw.hex())
             return sn
 
-    def discover(self, *, exhaustive=False, fallback=True):
+    def discover(self, *, exhaustive=False, fallback=True, recent_ids=()):
         """优先来料 ID=1 与工位 ID；无响应再只读扫描其余 1..127。"""
-        preferred = list(dict.fromkeys((1, self.config.target_id)))
+        preferred = [1]
+        if self.config.target_id not in (None, 1):
+            preferred.append(self.config.target_id)
+        preferred.extend(node for node in recent_ids if node not in preferred)
         started = time.perf_counter()
         self.event('discovery.start', preferred_ids=preferred, exhaustive=exhaustive, fallback=fallback)
-        with self.connect() as bench:
+        with self.connect(1) as bench:
             found = []
             scanned, timeouts = [], []
             def find(nodes):
@@ -138,7 +156,7 @@ class Maintenance:
                     scanned.append(node)
                     try:
                         self.read(bench, node, 0x2040, 1, timeout=.012 if exhaustive else .025, diagnostic_probe=True)
-                    except TimeoutError:
+                    except SdoReplyTimeout:
                         timeouts.append(node)
                         # 本会话仅探测，不写数据。不同 node 的迟到应答不会被下一节点接受。
                         # 任何后续维护会另开会话，绝不把不确定读事务接到写事务上。
@@ -152,17 +170,23 @@ class Maintenance:
                       elapsed_s=round(time.perf_counter()-started,4))
             if len(found) != 1:
                 if found:
-                    raise RuntimeError('发现多个待测电机 ID：'+','.join(map(str, found))+'，请仅连接一台')
-                raise TimeoutError('尚未发现来料电机（优先 ID 1，自动扫描 1～127）')
+                    raise MultipleMotors('发现多个待测电机 ID：'+','.join(map(str, found))+'，请仅连接一台')
+                scope = '1～127' if fallback or exhaustive else '、'.join(map(str, preferred))
+                raise MotorAbsent(f'本轮探测未收到电机响应（ID {scope}）')
             node = found[0]
-            raw = bench._bus.motor(node).read_serial_bytes(timeout=.2)
+            try:
+                raw = bench._bus.motor(node).read_serial_bytes(timeout=.2)
+            except InterruptedError:
+                raise
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise MotorIdentityUnreadable(node, exc) from exc
             sn = raw.rstrip(b'\0').decode('ascii', errors='replace') or '未写入 SN'
             self.event('discovery.identity',node_id=node,sn=sn,raw=raw.hex(),
                        elapsed_s=round(time.perf_counter()-started,4))
             return dict(node_id=node, sn=sn)
 
     def assign_id(self, source_id, expected_current):
-        target = self.config.target_id
+        target = self.config.require_target_id()
         if source_id == target:
             log_event('motor.id.unchanged', node_id=target)
             return
@@ -242,9 +266,9 @@ class Maintenance:
         self.wait_sn(sn)
         log_event('motor.sn.verified',node_id=node,sn=sn)
 
-    def calibrate(self):
-        node = self.config.target_id
-        with self.connect() as bench:
+    def calibrate(self, node=None):
+        node = self.config.require_target_id() if node is None else node
+        with self.connect(node) as bench:
             motor = bench.motor(node)
             log_event('motor.disable.request',node_id=node,reason='before_calibration')
             motor.disable()

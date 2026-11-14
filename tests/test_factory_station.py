@@ -16,7 +16,8 @@ from scripts.factory_test.station_config import (StationConfig, load_config, sav
                                                 hardware_parts, hardware_input_value, temporary_sn)
 from scripts.factory_test.integrations import (MesClient, PrinterClient, PrintUnknown,
     IntegrationError, PendingConfiguration, mes_payload)
-from scripts.factory_test.maintenance import Maintenance
+from motor_platform.components.motor.client import SdoReplyTimeout
+from scripts.factory_test.maintenance import Maintenance, MotorAbsent, MotorIdentityUnreadable
 from scripts.factory_test.station import StationRunner, DemoServices, PresenceLatch, RecoveryRequired
 from tests.test_motor import FakeTransport
 
@@ -99,14 +100,15 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.mes_url, 'https://www.mirrormetech.com/mes-api')
         self.assertEqual(config.report_upload_url, 'https://www.mirrormetech.com/mes-api/open-api/test-report')
         self.assertNotIn('fixtureId',mes_payload(config,'test-request'))
-    def test_remembers_id_and_model_without_secrets_or_old_auto_date(self):
+    def test_remembers_material_and_derives_id_without_persisting_an_override(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)/'station.json'
-            config = StationConfig(target_id=3, automatic=False)
+            config = StationConfig(category='HIPX', subcategory='LRRF', automatic=False)
             save_config(config, path)
             loaded = load_config(path)
             self.assertEqual(asdict(loaded), asdict(config))
-            self.assertEqual(loaded.target_id, 3)
+            self.assertEqual(loaded.target_id, 2)
+            self.assertNotIn('target_id', json.loads(path.read_text(encoding='utf-8')))
             self.assertEqual(loaded.production_date, '')
             self.assertNotIn('api_key', json.loads(path.read_text(encoding='utf-8')))
             self.assertEqual(list(Path(tmp).glob('*.tmp')), [])
@@ -116,10 +118,23 @@ class ConfigTests(unittest.TestCase):
             StationConfig(mes_url='').validate(live=True)
         StationConfig().validate(live=True)
         StationConfig(mes_url='https://example.test').validate(live=True)
-        for cfg in (StationConfig(target_id=128), StationConfig(hardware_version='0111'),
+        for cfg in (StationConfig(hardware_version='0111'),
                     StationConfig(project='TOO-LONG')):
             with self.assertRaises(ValueError): cfg.validate()
-        StationConfig(project='X2',category='ABCD',subcategory='XY12',factory='Z9').validate()
+        custom = StationConfig(project='X2',category='ABCD',subcategory='XY12',factory='Z9')
+        custom.validate()
+        self.assertIsNone(custom.target_id)
+        with self.assertRaisesRegex(ValueError, 'ABCD.*目标 ID'):
+            custom.validate(live=True)
+
+    def test_material_and_side_set_the_production_id_for_both_product_families(self):
+        from scripts.factory_test.station_config import MATERIALS
+        for project, categories in MATERIALS.items():
+            for category, expected in (('HIPX',2),('HIPY',2),('KNEE',3)):
+                for subcategory in categories[category]:
+                    with self.subTest(project=project, category=category, subcategory=subcategory):
+                        config=StationConfig(project=project, category=category, subcategory=subcategory)
+                        self.assertEqual(config.require_target_id(), expected)
 
 
 class MesTests(unittest.TestCase):
@@ -246,10 +261,35 @@ class MaintenanceTests(unittest.TestCase):
         transport.on_send=answer
         maintenance=Maintenance(StationConfig())
         @contextmanager
-        def connected(): yield bench
+        def connected(node):
+            self.assertEqual(node,1)
+            yield bench
         maintenance.connect=connected
-        self.assertEqual(maintenance.discover(),dict(node_id=1,sn=SN))
+        for category in ('KNEE','HIPX','ABCD'):
+            maintenance.config = StationConfig(category=category)
+            self.assertEqual(maintenance.discover(),dict(node_id=1,sn=SN))
         self.assertTrue(all(frame.data[0]==0x40 for frame in transport.sent))
+
+    def test_absence_requires_protocol_timeouts_not_usb_timeouts(self):
+        bench = Mock()
+        maintenance = Maintenance(StationConfig())
+        @contextmanager
+        def connected(node): yield bench
+        maintenance.connect = connected
+        maintenance.read = Mock(side_effect=TimeoutError('USB write timed out'))
+        with self.assertRaises(TimeoutError) as caught:
+            maintenance.discover(fallback=False)
+        self.assertNotIsInstance(caught.exception, MotorAbsent)
+        self.assertEqual(maintenance.read.call_count, 1)
+        maintenance.read = Mock(side_effect=SdoReplyTimeout())
+        with self.assertRaises(MotorAbsent):
+            maintenance.discover(fallback=False, recent_ids=(7,))
+        self.assertEqual([call.args[1] for call in maintenance.read.call_args_list], [1,3,7])
+        maintenance.read = Mock(side_effect=[1,SdoReplyTimeout()])
+        bench._bus.motor.return_value.read_serial_bytes.side_effect = SdoReplyTimeout('SN')
+        with self.assertRaises(MotorIdentityUnreadable) as caught:
+            maintenance.discover(fallback=False)
+        self.assertEqual(caught.exception.node_id, 1)
 
     def test_multiple_known_ids_block_all_maintenance(self):
         bench,transport=self.bench()
@@ -257,7 +297,7 @@ class MaintenanceTests(unittest.TestCase):
             b'\x4f'+frame.data[1:4]+bytes([frame.can_id-0x600,0,0,0]))]
         maintenance=Maintenance(StationConfig())
         @contextmanager
-        def connected(): yield bench
+        def connected(node): yield bench
         maintenance.connect=connected
         with self.assertRaisesRegex(RuntimeError,'多个'): maintenance.discover()
         self.assertTrue(all(frame.data[0]==0x40 for frame in transport.sent))
@@ -266,11 +306,11 @@ class MaintenanceTests(unittest.TestCase):
         bench,_=self.bench()
         maintenance=Maintenance(StationConfig())
         @contextmanager
-        def connected(): yield bench
+        def connected(node): yield bench
         maintenance.connect=connected
         def read(_bench,node,*args,**kwargs):
             if node in (1,7): return node
-            raise TimeoutError()
+            raise SdoReplyTimeout()
         maintenance.read=Mock(side_effect=read)
         with self.assertRaisesRegex(RuntimeError,'多个'): maintenance.discover(exhaustive=True)
         self.assertEqual(maintenance.read.call_count,127)
@@ -313,7 +353,7 @@ class MaintenanceTests(unittest.TestCase):
         bench=Mock()
         bench.motor.return_value=motor
         @contextmanager
-        def connected(): yield bench
+        def connected(node): yield bench
         maintenance.connect=connected
         maintenance.read=Mock(side_effect=reads)
         maintenance.write=Mock()
@@ -388,7 +428,7 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(service.write_sn.call_args_list[1].args,(SN,runner.config.base_sn))
             service.print_sn.assert_called_once_with(SN)
 
-    def test_incoming_id_is_separate_from_persistent_target_id(self):
+    def test_incoming_id_is_separate_from_product_target_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner,service=self.runner(tmp)
             service.assign_id=Mock()
@@ -397,6 +437,19 @@ class PipelineTests(unittest.TestCase):
             service.assign_id.assert_called_once_with(1,'blank')
             self.assertEqual(result['detected_id'],1)
             self.assertEqual(result['config']['target_id'],3)
+
+    def test_resume_with_legacy_mismatched_target_never_contacts_motor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner,service=self.runner(tmp)
+            service.allocate=Mock(side_effect=TimeoutError('MES unavailable'))
+            result=runner.begin('incoming',1)
+            self.assertEqual(result['status'],'FAILED')
+            result['config']['target_id']=7
+            runner.save()
+            service.probe=Mock()
+            with self.assertRaisesRegex(RecoveryRequired,'目标 ID'):
+                runner.resume()
+            service.probe.assert_not_called()
 
     def test_calibration_failure_prevents_measurement_and_allocating(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -416,6 +469,21 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(runner.begin('blank')['status'],'FAILED')
             service.allocate.assert_not_called();service.print_sn.assert_not_called()
 
+    def test_measurement_cleanup_warning_survives_report_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner,service=self.runner(tmp)
+            events = []
+            runner.emit=lambda *event: events.append(event)
+            service.measure=Mock(return_value=dict(status='INCOMPLETE',error='测量中止',
+                                    error_notes=['电机失能未确认']))
+            service.render=Mock(side_effect=OSError('disk full'))
+            result=runner.begin('blank')
+            failure=next(value for kind,value in events if kind=='failed')
+            self.assertEqual(failure['message'], '测量中止')
+            self.assertIn('电机失能未确认', failure['notes'])
+            self.assertTrue(any('disk full' in note for note in failure['notes']))
+            self.assertEqual(failure['notes'], result['error_notes'])
+
     def test_allocation_recovery_uses_persisted_payload_and_no_retesting(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner,service=self.runner(tmp)
@@ -434,7 +502,10 @@ class PipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             runner,service=self.runner(tmp)
             service.print_sn=Mock(side_effect=PrintUnknown('timeout'))
+            runner.emit=Mock()
             result=runner.begin('blank')
+            failure=next(c.args[1] for c in runner.emit.call_args_list if c.args[0]=='failed')
+            self.assertEqual(failure['status'], 'UNKNOWN')
             self.assertIn('print',result['steps'],msg=str(result))
             self.assertEqual(result['steps']['print'],'UNKNOWN')
             restarted,_=self.runner(tmp)
@@ -482,6 +553,20 @@ class PipelineTests(unittest.TestCase):
             runner.emit=emit
             self.assertEqual(runner.begin('blank')['status'],'FAILED')
             service.assign_id.assert_not_called()
+
+    def test_identity_change_and_inconclusive_scan_each_break_the_streak(self):
+        latch=PresenceLatch(2)
+        self.assertFalse(latch.observe(True,0,(1,'A')))
+        self.assertFalse(latch.observe(True,1,(3,'B')))
+        self.assertTrue(latch.observe(True,2,(3,'B')))
+        latch.completed()
+        latch.observe(False,3)
+        latch.observe(None,6)
+        self.assertTrue(latch.wait_removal)
+        latch.observe(False,9)
+        self.assertTrue(latch.wait_removal)
+        latch.observe(False,11)
+        self.assertFalse(latch.wait_removal)
 
     def test_presence_requires_removal_and_two_successful_probes(self):
         latch=PresenceLatch(2)

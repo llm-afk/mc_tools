@@ -10,7 +10,7 @@
 - help_view.py：只读、可检索的离线使用手册，不连接设备或切换工作模式。
 - station.py：11 步产测状态机、工件落盘、恢复和异常归档。
 - maintenance.py、device_status.py：来料探测、身份核对、写入、校准和设备健康状态。
-- firmware.py、firmware_library.py、firmware_settings.py：GD / ADM APP 检查、OTA 和持久固件选择。
+- firmware.py、firmware_library.py、firmware_settings.py：EXE 旁单层 APP 文件的数字版本检查、OTA 和只读状态显示。
 - measurements/kt_curve、measurements/tn_curve：两项实际测量内核，由工位传入设备、目标与输出目录。
 - measurements/console.py：测量进度事件与取消信号；不再依赖交互式终端。
 - measurements/csv_streams.py、measurements/smoothing.py：离线匹配与平滑，不占用控制循环。
@@ -38,7 +38,7 @@ A / D 不是硬件版本白名单；型号对应的已确认测量扭矩仍由�
 
 校准和停机只依赖固件可观测的协议结果；已校准标志不一定证明新一轮已完成。
 缺少可验证状态时保存异常并阻止后续动作，失能未确认会明确提示断开工装电源。
-当前 GD / ADM 的 APP OTA 协议共用；BOOT 仅归档，由烧录工装处理。
+当前 GD / ADM 的 APP OTA 协议共用；firmware 仅放 APP，BOOT 由烧录工装处理。
 
 ## 指标与保存
 
@@ -73,6 +73,6 @@ network_status.py 通过隐藏的 PowerShell / .NET 本机属性读取接口、I
 检查拦截真实 USB、串口和网络。构建检查源码稳定性、回归、打印服务测试、隔离环境 EXE、完整模拟流程及 Help 内嵌手册，最后核对文件 SHA256。
 编译和检查在系统临时目录完成，更新根目录 EXE 与 release-manifest.json 后清理临时产物。构建失败时保留临时诊断位置。
 每次交付更新 version.py 与 pyproject.toml，标题、角落、日志、Windows 元数据和发布清单共用版本。
-整包交付由用户压缩整个 pmt 文件夹完成，不生成独立部署目录或自动 ZIP。
+根目录 EXE、发布清单、离线打印运行环境及 APP 随源码一起提交到 main。发布指纹按原始字节计算，由 .gitattributes 保持 clone 后的字节一致。用户也可以直接压缩整个 pmt 文件夹交付。
 
 这些离线结果不代表真实校准、OTA、物理出纸或生产云端已验收，实机联调须分别确认。

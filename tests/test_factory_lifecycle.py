@@ -98,7 +98,8 @@ class ConfigurationRaceTests(unittest.TestCase):
 
     def run_scan_with_edit(self, changes=None, *, credentials=False, configuring=False,wrong_connection=False):
         host=window(); host.config=StationConfig(simulation=True)
-        host.start_requested=host.resume_requested=False
+        host.resume_requested=False
+        host.start_requested=True  # User clicked on the preceding ready snapshot.
         host.demo_present=True; host.last_health=time.monotonic()
         host.latch=PresenceLatch(); host.latch.stable=3
         host.shutdown=Mock(); host.shutdown.is_set.return_value=False
